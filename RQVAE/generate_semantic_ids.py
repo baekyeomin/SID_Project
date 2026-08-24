@@ -201,7 +201,7 @@ def generate_split_semantic_ids(
     batch_size: int = 512,
     num_workers: int = 0,
 ) -> pd.DataFrame:
-    # 한 split의 모든 기사에 [c1, c2, c3] 생성
+    # 한 split의 모든 기사에 모델 기반 [c1, c2, c3] 생성 (c4는 이후 후처리)
     dataset = SemanticIdDataset(
         master_path=master_path,
         embeddings_path=embeddings_path,
@@ -271,7 +271,7 @@ def generate_split_semantic_ids(
             non_blocking=True,
         )
 
-        # frozen RQ-VAE로 [c1, c2, c3] 생성
+        # frozen RQ-VAE로 [c1, c2, c3] 생성 (c4는 모델 밖에서 후처리)
         output = model.get_semantic_ids(
             x=x,
             category_ids=category_ids,
@@ -315,31 +315,70 @@ def generate_split_semantic_ids(
     return result
 
 
+
+def assign_disambiguation_c4(
+    result: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    같은 (c1, c2, c3)를 가진 기사들을 구분하기 위한 후처리용 c4를 부여한다.
+
+    - c4는 RQ-VAE codebook / 학습 / residual 계산과 무관하다.
+    - 같은 (c1, c2, c3) 그룹 안에서 등장 순서대로 0, 1, 2, ...를 부여한다.
+    - 중복이 없는 기사도 c4=0을 갖는다.
+    - Train + Validation을 합친 뒤 적용해야 전체 데이터 기준 최종 SID가 유일해진다.
+    """
+    result = result.copy()
+
+    result["c4"] = (
+        result
+        .groupby(["c1", "c2", "c3"], sort=False)
+        .cumcount()
+        .astype(np.int64)
+    )
+
+    return result
+
+
 def print_sid_statistics(
     result: pd.DataFrame,
     split: str,
 ) -> None:
-    # 생성된 Semantic ID 사용 분포 확인
-    unique_full_sid = (
+    # 생성된 Semantic ID 사용 분포 및 c4 구분 결과 확인
+    unique_c123 = (
         result[["c1", "c2", "c3"]]
         .drop_duplicates()
         .shape[0]
     )
 
+    unique_full_sid = (
+        result[["c1", "c2", "c3", "c4"]]
+        .drop_duplicates()
+        .shape[0]
+    )
+
+    duplicated_c123_articles = int(
+        result.duplicated(
+            subset=["c1", "c2", "c3"],
+            keep=False,
+        ).sum()
+    )
+
     print("\n" + "=" * 70)
     print(f"{split.upper()} SID STATISTICS")
     print("=" * 70)
-    print(f"Articles        : {len(result)}")
-    print(f"Unique c1       : {result['c1'].nunique()}")
-    print(f"Unique c2       : {result['c2'].nunique()}")
-    print(f"Unique c3       : {result['c3'].nunique()}")
-    print(f"Unique full SID : {unique_full_sid}")
+    print(f"Articles             : {len(result)}")
+    print(f"Unique c1            : {result['c1'].nunique()}")
+    print(f"Unique c2            : {result['c2'].nunique()}")
+    print(f"Unique c3            : {result['c3'].nunique()}")
+    print(f"Unique (c1,c2,c3)    : {unique_c123}")
+    print(f"Articles in dup c123 : {duplicated_c123_articles}")
+    print(f"Unique final SID     : {unique_full_sid}")
     print(
-        f"SID uniqueness  : "
+        f"Final SID uniqueness : "
         f"{unique_full_sid / max(len(result), 1):.4f}"
     )
+    print(f"Max c4               : {int(result['c4'].max()) if len(result) else 0}")
     print("=" * 70)
-
 
 def print_coverage_summary(
     train_result: pd.DataFrame,
@@ -503,6 +542,28 @@ def generate_semantic_ids(
         num_workers=num_workers,
     )
 
+    # Train + Validation을 먼저 합친 뒤,
+    # 전체 데이터 기준 동일한 (c1, c2, c3)를 c4=0,1,2,...로 구분
+    all_result = pd.concat(
+        [train_result, validation_result],
+        ignore_index=True,
+    )
+
+    all_result = assign_disambiguation_c4(
+        result=all_result,
+    )
+
+    # c4가 부여된 결과를 다시 split별로 분리
+    train_result = (
+        all_result[all_result["split"] == "train"]
+        .reset_index(drop=True)
+    )
+
+    validation_result = (
+        all_result[all_result["split"] == "validation"]
+        .reset_index(drop=True)
+    )
+
     print_sid_statistics(
         result=train_result,
         split="train",
@@ -513,7 +574,12 @@ def generate_semantic_ids(
         split="validation",
     )
 
-    # Train/Validation 결과를 각각 저장
+    print_sid_statistics(
+        result=all_result,
+        split="train+validation",
+    )
+
+    # c4까지 포함된 Train/Validation 결과를 각각 저장
     train_output_path = (
         output_dir / "train_article_semantic_ids.parquet"
     )
@@ -533,11 +599,6 @@ def generate_semantic_ids(
     )
 
     # Train + Validation을 합친 전체 SID 파일 저장
-    all_result = pd.concat(
-        [train_result, validation_result],
-        ignore_index=True,
-    )
-
     all_output_path = (
         output_dir / "article_semantic_ids.parquet"
     )
