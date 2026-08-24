@@ -1,0 +1,13 @@
+#경로들은 변경필요 !
+
+%cd /content/drive/MyDrive/RQ-VAE-Recommender-main
+
+!PYTHONPATH=/content/drive/MyDrive/RQ-VAE-Recommender-main \ 
+python evaluate/evaluate_all.py \
+    --sid out/semantic_ids/ebnerd/article_semantic_ids.parquet \
+    --data-dir datasets/ebnerd \
+    --checkpoint out/rqvae/ebnerd/checkpoint_final.pt \
+    --split all \
+    --q2-size 256 \
+    --q3-size 256 \
+    --pairs 50000

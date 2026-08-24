@@ -1,0 +1,32 @@
+1. eval_c1_sanity.py
+c1이 원래 category ID랑 제대로 똑같이 들어갔는지
+(deterministic 하니까 100나올것)
+
+2. eval_c2_event_consistency.py
+같은 사건(event_id)의 기사들이 비슷한 c2를 받았는지
+같은 event_id를 가진 기사들을 하나의 그룹으로 묶고, 그 안에서 가장 많이 나온 c2의 비율을 계산하되, 기사 1개인 event는 제외
+
+3. eval_codebook_usage.py
+Q2/Q3의 코드북 내 코드들 중 한 번 이라도 사용된 코드가 몇 개인지
+
+4. eval_sid_collision.py
+서로 다른 기사인데 c1,c2,c3가 완전히 똑같은 경우가 얼마나 있는지
+
+5. eval_reconstruction.py
+Train valid 각각 RQ-VAE가 원래 article embedding을 얼마나 잘 복원하는지
+(model outputdml reconstruction loss를 가져오고 전체기사에 대해 평균냄)
+
+6.eval_semantic_similarity.py
+같은 카테고리(c1)안에서도 같은 c2 받은 기사끼리 실제 의미가 더비슷함을 나타내기 위해
+각 쌍(c1c2 positive/ c1c2 negative)의 원본 임베딩 코사인 유사도 계산
++
+c3도 (같은 c1 + 같은 c2 + 같은 c3)와 (같은 c1 + 같은 c2 + 다른 c3) 코사인 유사도 각각 계산한 뒤 차를 계산해서
+c1과 c2가 이미 같은 기사들 중에서, c3까지 같은 기사들이 더 semantic하게 비슷한가?를 보도록함
+
+
+7.common.py
+평가X
+SID 파일에서 article_id, c1, c2, c3읽고 master 파일 열어서 article_id 기준 머지하는 파일
+
+8. evaluate_all.py
+이 모든걸 한 번에 다하도록하는 코드 (실행코드 txt 참고)
