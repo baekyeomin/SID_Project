@@ -124,11 +124,11 @@ class Quantize(nn.Module):
     # Properties
     # ============================================================
 
-    @property # 함수 호출이 아닌 객체 속성처럼 quantizer.weight로 접근할 수 있게 함
-    def weight(self) -> Tensor:  #shape: [n_embed, embed_dim]
+    @property # self.embedding.weight를 매번 길게 쓰지 않고 그냥 함수 호출이 아닌 객체 속성처럼 quantizer.weight로 접근할 수 있게 함
+    def weight(self) -> Tensor:  #shape: [n_embed(코드북크기), embed_dim]
         return self.embedding.weight # raw codebook parameter를 그대로 반환
 
-    @property # quantizer.device 형태로 현재 device에 접근 가능하게 함
+    @property # 현재 codebook이 어디에 올라가 있는지 확인
     def device(self) -> torch.device:
         return self.embedding.weight.device
 
@@ -141,14 +141,14 @@ class Quantize(nn.Module):
             self.embedding.weight,
             a=-1.0 / self.n_embed,
             b=1.0 / self.n_embed,
-        )
+        ) #코드북 vector들을 uniform random distribution으로 초기화하는 함수
 
     # ============================================================
     # External Codebook Initialization
     # ============================================================
 
     @torch.no_grad() # Q2 K-means 초기화는 학습이 아니므로 gradient를 기록하지 않음
-    def set_codebook(self,codebook_vectors: Tensor, ) -> None: # 외부에서 계산한 centroid들, 예: [256,128]
+    def set_codebook(self,codebook_vectors: Tensor, ) -> None: # kmeans.py에서 계산한 centroid들, 예: [256,128]
 
         # 현재 Quantize가 기대하는 codebook shape 정의 [ code수 , 코드벡터차원]
         expected_shape = (self.n_embed, self.embed_dim,)
@@ -243,7 +243,7 @@ class Quantize(nn.Module):
         fixed_ids = fixed_ids.to(device=self.device, dtype=torch.long,)
         # [B,1] 등으로 들어와도 강제로 [B] 형태로 평탄화
         fixed_ids = fixed_ids.view(-1)
-        # category 개수와 현재 batch 기사 개수가 같은지 확인
+        # 현재 batch에 들어온 category ID 개수 != 현재 batch의 기사 개수
         if (fixed_ids.shape[0] != x.shape[0]):
 
             raise ValueError(
