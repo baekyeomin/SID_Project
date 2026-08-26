@@ -1,29 +1,40 @@
 import modules.quantize
+
 train.iterations = 50000
 train.batch_size = 64
 train.learning_rate = 0.0001
 train.weight_decay = 0.01
 train.gradient_accumulate_every = 1
-train.dataset_folder = "datasets/mind"
+
+train.dataset_folder = "datasets/ebnerd"
+
 train.vae_input_dim = 768
 train.vae_hidden_dims = [512]
 train.vae_embed_dim = 256
-train.vae_num_categories = 18
+train.vae_num_categories = 25
 train.vae_c2_codebook_size = 256
-train.vae_c3_codebook_size = 256
+train.vae_c3_codebook_size = 512
+
 train.vae_codebook_normalize = False
 train.vae_codebook_mode = %modules.quantize.QuantizeForwardMode.STE
+
 train.lambda_rec = 1.0
 train.lambda_cb = 1.0
 train.lambda_com = 0.25
+
 train.kmeans_encode_batch_size = 512
+
 train.amp = True
 train.mixed_precision_type = "fp16"
 train.split_batches = True
+
 train.seed = 42
-train.do_eval = False
+
+train.do_eval = True
 train.eval_every = 5000
-train.save_dir_root = "out/rqvae/mind/"
+
+train.save_dir_root = "out/rqvae/ebnerd/"
 train.save_model_every = 5000
 train.pretrained_rqvae_path = None
+
 train.wandb_logging = True
