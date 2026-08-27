@@ -313,11 +313,17 @@ class Quantize(nn.Module):
         if self.training:
             # Gumbel Softmax
             if (self.forward_mode== QuantizeForwardMode.GUMBEL_SOFTMAX):
-                weights = (gumbel_softmax(-dist,temperature=temperature,device=self.device,))
+                weights = (gumbel_softmax(-dist,temperature=temperature,device=self.device,hard = True,))
 
                 # weighted combination
                 emb = (weights @ codebook)
                 emb_out = emb
+                
+                ids = (
+                    weights
+                    .detach()
+                    .argmax(dim=1)
+                )
 
             # STE
             elif (self.forward_mode == QuantizeForwardMode.STE):
