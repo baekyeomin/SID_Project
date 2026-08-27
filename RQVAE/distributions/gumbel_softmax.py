@@ -23,11 +23,9 @@ def gumbel(
         max=1.0 - eps,
     )
 
-    gumbel_noise = -torch.log(
+    return -torch.log(
         -torch.log(uniform)
     )
-
-    return gumbel_noise
 
 
 def gumbel_softmax(
@@ -39,7 +37,7 @@ def gumbel_softmax(
 
     if temperature <= 0:
         raise ValueError(
-            f"temperature must be > 0, got {temperature}."
+            "temperature must be greater than 0."
         )
 
     noise = gumbel(
@@ -48,20 +46,15 @@ def gumbel_softmax(
         dtype=logits.dtype,
     )
 
-    noisy_logits = (
-        logits
-        + noise
-    )
-
     y_soft = torch.softmax(
-        noisy_logits / temperature,
+        (logits + noise) / temperature,
         dim=-1,
     )
 
     if not hard:
         return y_soft
 
-    max_indices = y_soft.argmax(
+    index = y_soft.argmax(
         dim=-1,
         keepdim=True,
     )
@@ -69,21 +62,20 @@ def gumbel_softmax(
     y_hard = torch.zeros_like(
         y_soft
     ).scatter_(
-        dim=-1,
-        index=max_indices,
-        value=1.0,
+        -1,
+        index,
+        1.0,
     )
 
-    y = (
+    return (
         y_hard
         - y_soft.detach()
         + y_soft
     )
 
-    return y
-
 
 class TemperatureScheduler:
+
     def __init__(
         self,
         t0: float = 1.0,
@@ -93,30 +85,27 @@ class TemperatureScheduler:
 
         if t0 <= 0:
             raise ValueError(
-                f"t0 must be > 0, got {t0}."
+                "t0 must be greater than 0."
             )
 
         if min_t <= 0:
             raise ValueError(
-                f"min_t must be > 0, got {min_t}."
-            )
-
-        if anneal_rate < 0:
-            raise ValueError(
-                "anneal_rate must be >= 0, "
-                f"got {anneal_rate}."
+                "min_t must be greater than 0."
             )
 
         if min_t > t0:
             raise ValueError(
-                "min_t must be <= t0. "
-                f"t0={t0}, min_t={min_t}."
+                "min_t must be less than or equal to t0."
+            )
+
+        if anneal_rate < 0:
+            raise ValueError(
+                "anneal_rate must be greater than or equal to 0."
             )
 
         self.t0 = t0
         self.min_t = min_t
         self.anneal_rate = anneal_rate
-
 
     def get_t(
         self,
