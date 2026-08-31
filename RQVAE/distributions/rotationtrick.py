@@ -203,4 +203,4 @@ def rotation_trick_transform(
         .squeeze(1)
     )
 
-    return rotated
+    return rotated 
