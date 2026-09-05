@@ -1,0 +1,32 @@
+{
+  "package_name": "transformer_inputs",
+  "export_dir": "C:\\Users\\samsung\\OneDrive\\바탕 화면\\학부연구생\\2026\\에이전트팀\\SID_Project\\data\\output\\experiments\\normalize_v2\\exports\\transformer_inputs",
+  "files": [
+    {
+      "name": "article_semantic_ids.parquet",
+      "path": "C:\\Users\\samsung\\OneDrive\\바탕 화면\\학부연구생\\2026\\에이전트팀\\SID_Project\\data\\output\\experiments\\normalize_v2\\exports\\transformer_inputs\\article_semantic_ids.parquet",
+      "size_bytes": 283439
+    },
+    {
+      "name": "train_sequences.parquet",
+      "path": "C:\\Users\\samsung\\OneDrive\\바탕 화면\\학부연구생\\2026\\에이전트팀\\SID_Project\\data\\output\\experiments\\normalize_v2\\exports\\transformer_inputs\\train_sequences.parquet",
+      "size_bytes": 34781574
+    },
+    {
+      "name": "validation_sequences.parquet",
+      "path": "C:\\Users\\samsung\\OneDrive\\바탕 화면\\학부연구생\\2026\\에이전트팀\\SID_Project\\data\\output\\experiments\\normalize_v2\\exports\\transformer_inputs\\validation_sequences.parquet",
+      "size_bytes": 52999905
+    },
+    {
+      "name": "category_mapping.parquet",
+      "path": "C:\\Users\\samsung\\OneDrive\\바탕 화면\\학부연구생\\2026\\에이전트팀\\SID_Project\\data\\output\\experiments\\normalize_v2\\exports\\transformer_inputs\\category_mapping.parquet",
+      "size_bytes": 1145
+    }
+  ],
+  "validation": {
+    "status": "PASS",
+    "semantic_id_count": 12860,
+    "train_sequence_count": 232887,
+    "validation_sequence_count": 244647
+  }
+}
