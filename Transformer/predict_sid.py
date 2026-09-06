@@ -1,7 +1,3 @@
-# 학습된 checkpoint_best.pt를 불러와서
-# test_sequences.parquet의 history만 모델에 넣고
-# teacher forcing 없이 c1 → c2 → c3 → c4를 beam search로 생성
-
 from __future__ import annotations
 
 import argparse
@@ -60,8 +56,9 @@ def normalize_article_id(article_id):
 def load_sid_catalog(
     article_sid_path: Path,
 ) -> Tuple[
-    Dict[Tuple[int, ...], Tuple[int, ...]],
     Dict[SID, str],
+    Dict[Tuple[int, ...], List[SID]],
+    List[SID],
 ]:
 
     if not article_sid_path.exists():
@@ -128,15 +125,29 @@ def load_sid_catalog(
             f"{duplicate_sid_count}개 SID 그룹에서 발견되었습니다."
         )
 
-    prefix_sets: Dict[
-        Tuple[int, ...],
-        set,
-    ] = {}
+    df = (
+        df.sort_values(
+            [
+                "c1",
+                "c2",
+                "c3",
+                "c4",
+            ]
+        )
+        .reset_index(drop=True)
+    )
 
     sid_to_article: Dict[
         SID,
         str,
     ] = {}
+
+    prefix_to_sids: Dict[
+        Tuple[int, ...],
+        List[SID],
+    ] = {}
+
+    all_sids: List[SID] = []
 
     for _, row in df.iterrows():
 
@@ -151,28 +162,34 @@ def load_sid_catalog(
             row[article_id_column]
         )
 
-        sid_to_article[sid] = article_id
-
-        # 각 prefix에서 실제로 존재하는 다음 code만 허용
-        for level in range(4):
-
-            prefix = sid[:level]
-            next_code = sid[level]
-
-            if prefix not in prefix_sets:
-                prefix_sets[prefix] = set()
-
-            prefix_sets[prefix].add(
-                next_code
-            )
-
-    prefix_to_next = {
-        prefix: tuple(
-            sorted(next_codes)
+        sid_to_article[sid] = (
+            article_id
         )
-        for prefix, next_codes
-        in prefix_sets.items()
-    }
+
+        all_sids.append(
+            sid
+        )
+
+        for prefix_length in [
+            1,
+            2,
+            3,
+        ]:
+
+            prefix = sid[
+                :prefix_length
+            ]
+
+            if prefix not in prefix_to_sids:
+                prefix_to_sids[
+                    prefix
+                ] = []
+
+            prefix_to_sids[
+                prefix
+            ].append(
+                sid
+            )
 
     print()
     print("SID Catalog")
@@ -188,29 +205,23 @@ def load_sid_catalog(
         "Duplicated full SIDs:",
         duplicate_sid_count,
     )
-    print(
-        "Valid C1 candidates:",
-        len(
-            prefix_to_next.get(
-                (),
-                (),
-            )
-        ),
-    )
 
     return (
-        prefix_to_next,
         sid_to_article,
+        prefix_to_sids,
+        all_sids,
     )
 
 
 def validate_catalog_against_model(
-    prefix_to_next: Dict[
-        Tuple[int, ...],
-        Tuple[int, ...],
-    ],
+    all_sids: List[SID],
     model: NewsEncoderDecoderTransformer,
 ) -> None:
+
+    if len(all_sids) == 0:
+        raise ValueError(
+            "SID catalog is empty."
+        )
 
     vocab_sizes = [
         model.c1_vocab_size,
@@ -219,28 +230,19 @@ def validate_catalog_against_model(
         model.c4_vocab_size,
     ]
 
-    for prefix, next_codes in (
-        prefix_to_next.items()
-    ):
+    for level in range(4):
 
-        level = len(prefix)
-
-        if (
-            level >= 4
-            or len(next_codes) == 0
-        ):
-            continue
-
-        vocab_size = (
-            vocab_sizes[level]
-        )
+        codes = [
+            sid[level]
+            for sid in all_sids
+        ]
 
         min_code = min(
-            next_codes
+            codes
         )
 
         max_code = max(
-            next_codes
+            codes
         )
 
         if min_code < 0:
@@ -249,24 +251,86 @@ def validate_catalog_against_model(
                 f"at level c{level + 1}."
             )
 
-        if max_code >= vocab_size:
+        if (
+            max_code
+            >= vocab_sizes[level]
+        ):
             raise ValueError(
                 f"SID catalog contains "
                 f"c{level + 1}={max_code}, "
                 f"but model vocab size is "
-                f"{vocab_size}."
+                f"{vocab_sizes[level]}."
             )
 
 
+def find_nearest_existing_sid(
+    predicted_sid: SID,
+    sid_to_article: Dict[SID, str],
+    prefix_to_sids: Dict[
+        Tuple[int, ...],
+        List[SID],
+    ],
+    all_sids: List[SID],
+) -> Tuple[
+    SID,
+    int,
+]:
+
+    # distance = 4 - longest common prefix length
+
+    if predicted_sid in sid_to_article:
+        return (
+            predicted_sid,
+            0,
+        )
+
+    prefix3 = (
+        predicted_sid[:3]
+    )
+
+    if prefix3 in prefix_to_sids:
+        return (
+            prefix_to_sids[
+                prefix3
+            ][0],
+            1,
+        )
+
+    prefix2 = (
+        predicted_sid[:2]
+    )
+
+    if prefix2 in prefix_to_sids:
+        return (
+            prefix_to_sids[
+                prefix2
+            ][0],
+            2,
+        )
+
+    prefix1 = (
+        predicted_sid[:1]
+    )
+
+    if prefix1 in prefix_to_sids:
+        return (
+            prefix_to_sids[
+                prefix1
+            ][0],
+            3,
+        )
+
+    return (
+        all_sids[0],
+        4,
+    )
+
+
 @torch.no_grad()
-def constrained_beam_search_single(
+def unconstrained_beam_search_single(
     model: NewsEncoderDecoderTransformer,
     encoder_hidden_states: Tensor,
     encoder_attention_mask: Tensor,
-    prefix_to_next: Dict[
-        Tuple[int, ...],
-        Tuple[int, ...],
-    ],
     beam_size: int = 20,
     top_k: int = 10,
 ) -> List[
@@ -307,18 +371,12 @@ def constrained_beam_search_single(
         encoder_hidden_states.device
     )
 
-    # c1 → c2 → c3 → c4
+    # catalog와 관계없이 c1 → c2 → c3 → c4 생성
     for level in range(4):
 
         num_beams = len(
             beams
         )
-
-        if num_beams == 0:
-            raise RuntimeError(
-                f"No valid beam remained "
-                f"at SID level {level + 1}."
-            )
 
         repeated_encoder_hidden = (
             encoder_hidden_states.expand(
@@ -336,17 +394,21 @@ def constrained_beam_search_single(
         )
 
         if level == 0:
+
             prefix_tensor = None
 
         else:
-            prefix_tensor = torch.tensor(
-                [
-                    list(prefix)
-                    for prefix, _
-                    in beams
-                ],
-                dtype=torch.long,
-                device=device,
+
+            prefix_tensor = (
+                torch.tensor(
+                    [
+                        list(prefix)
+                        for prefix, _
+                        in beams
+                    ],
+                    dtype=torch.long,
+                    device=device,
+                )
             )
 
         logits = (
@@ -376,46 +438,27 @@ def constrained_beam_search_single(
             ]
         ] = []
 
+        vocab_size = (
+            log_probs.shape[-1]
+        )
+
+        local_k = min(
+            keep_size,
+            vocab_size,
+        )
+
         for beam_idx, (
             prefix,
             previous_score,
-        ) in enumerate(beams):
+        ) in enumerate(
+            beams
+        ):
 
-            valid_next_codes = (
-                prefix_to_next.get(
-                    prefix,
-                    (),
-                )
-            )
-
-            if len(
-                valid_next_codes
-            ) == 0:
-                continue
-
-            valid_ids = torch.tensor(
-                valid_next_codes,
-                dtype=torch.long,
-                device=device,
-            )
-
-            valid_log_probs = (
-                log_probs[
-                    beam_idx
-                ].index_select(
-                    dim=0,
-                    index=valid_ids,
-                )
-            )
-
-            local_k = min(
-                keep_size,
-                len(valid_next_codes),
-            )
-
-            top_values, top_positions = (
+            top_values, top_codes = (
                 torch.topk(
-                    valid_log_probs,
+                    log_probs[
+                        beam_idx
+                    ],
                     k=local_k,
                 )
             )
@@ -425,15 +468,15 @@ def constrained_beam_search_single(
             ):
 
                 next_code = int(
-                    valid_ids[
-                        top_positions[j]
-                    ].item()
+                    top_codes[j].item()
                 )
 
                 next_score = (
                     previous_score
                     + float(
-                        top_values[j].item()
+                        top_values[
+                            j
+                        ].item()
                     )
                 )
 
@@ -462,9 +505,7 @@ def constrained_beam_search_single(
 
     results = []
 
-    for sid, score in (
-        beams[:top_k]
-    ):
+    for sid, score in beams:
 
         if len(sid) != 4:
             continue
@@ -518,6 +559,7 @@ def load_checkpoint(
         )
 
     else:
+
         model.load_state_dict(
             checkpoint
         )
@@ -529,14 +571,19 @@ def load_checkpoint(
 def predict(
     model: NewsEncoderDecoderTransformer,
     dataloader: DataLoader,
+
     sid_to_article: Dict[
         SID,
         str,
     ],
-    prefix_to_next: Dict[
+
+    prefix_to_sids: Dict[
         Tuple[int, ...],
-        Tuple[int, ...],
+        List[SID],
     ],
+
+    all_sids: List[SID],
+
     device: torch.device,
     beam_size: int,
     top_k: int,
@@ -564,7 +611,7 @@ def predict(
             ].to(device)
         )
 
-        # target은 모델 입력에는 사용하지 않고 평가용으로만 저장
+        # target은 SID 생성에는 사용하지 않고 평가용으로만 저장
         target_sids = (
             batch[
                 "target_sids"
@@ -603,8 +650,8 @@ def predict(
                 ]
             )
 
-            predictions = (
-                constrained_beam_search_single(
+            generated_candidates = (
+                unconstrained_beam_search_single(
                     model=model,
 
                     encoder_hidden_states=
@@ -612,9 +659,6 @@ def predict(
 
                     encoder_attention_mask=
                         sample_encoder_mask,
-
-                    prefix_to_next=
-                        prefix_to_next,
 
                     beam_size=
                         beam_size,
@@ -669,18 +713,49 @@ def predict(
                 ][i]
             )
 
-            for rank, (
-                predicted_sid,
+            used_article_ids = set()
+
+            rank = 1
+
+            for (
+                generated_sid,
                 log_score,
-            ) in enumerate(
-                predictions,
-                start=1,
-            ):
+            ) in generated_candidates:
+
+                (
+                    matched_sid,
+                    sid_distance,
+                ) = (
+                    find_nearest_existing_sid(
+                        predicted_sid=
+                            generated_sid,
+
+                        sid_to_article=
+                            sid_to_article,
+
+                        prefix_to_sids=
+                            prefix_to_sids,
+
+                        all_sids=
+                            all_sids,
+                    )
+                )
 
                 predicted_article_id = (
-                    sid_to_article.get(
-                        predicted_sid
-                    )
+                    sid_to_article[
+                        matched_sid
+                    ]
+                )
+
+                # 여러 generated SID가 같은 기사로 매핑되면 중복 추천 제거
+                if (
+                    predicted_article_id
+                    in used_article_ids
+                ):
+                    continue
+
+                used_article_ids.add(
+                    predicted_article_id
                 )
 
                 prediction_rows.append(
@@ -718,25 +793,50 @@ def predict(
                         "rank":
                             rank,
 
+                        # Transformer가 실제 생성한 SID
                         "pred_c1":
-                            predicted_sid[0],
+                            generated_sid[0],
 
                         "pred_c2":
-                            predicted_sid[1],
+                            generated_sid[1],
 
                         "pred_c3":
-                            predicted_sid[2],
+                            generated_sid[2],
 
                         "pred_c4":
-                            predicted_sid[3],
+                            generated_sid[3],
+
+                        # 실제 기사 catalog에서 찾은 가장 가까운 SID
+                        "matched_c1":
+                            matched_sid[0],
+
+                        "matched_c2":
+                            matched_sid[1],
+
+                        "matched_c3":
+                            matched_sid[2],
+
+                        "matched_c4":
+                            matched_sid[3],
 
                         "pred_article_id":
                             predicted_article_id,
+
+                        "sid_distance":
+                            sid_distance,
+
+                        "exact_sid_match":
+                            sid_distance == 0,
 
                         "log_score":
                             log_score,
                     }
                 )
+
+                rank += 1
+
+                if rank > top_k:
+                    break
 
             sample_index += 1
 
@@ -756,7 +856,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Predict next-news Semantic IDs "
-            "with constrained beam search."
+            "and map them to nearest existing article SID."
         )
     )
 
@@ -883,26 +983,32 @@ def main() -> None:
     print(
         "Transformer SID Prediction"
     )
+
     print(
         "Device:",
         device,
     )
+
     print(
         "Test path:",
         test_path,
     )
+
     print(
         "Checkpoint:",
         checkpoint_path,
     )
+
     print(
         "Article SID:",
         article_sid_path,
     )
+
     print(
         "Beam size:",
         args.beam_size,
     )
+
     print(
         "Top-K:",
         args.top_k,
@@ -951,9 +1057,11 @@ def main() -> None:
         checkpoint_path=
             checkpoint_path,
 
-        model=model,
+        model=
+            model,
 
-        device=device,
+        device=
+            device,
     )
 
     print(
@@ -969,37 +1077,25 @@ def main() -> None:
         "epoch"
         in checkpoint
     ):
+
         print(
             "Best epoch:",
-            checkpoint["epoch"],
-        )
-
-    if (
-        isinstance(
-            checkpoint,
-            dict,
-        )
-        and
-        "validation_loss"
-        in checkpoint
-    ):
-        print(
-            "Validation loss:",
             checkpoint[
-                "validation_loss"
+                "epoch"
             ],
         )
 
     (
-        prefix_to_next,
         sid_to_article,
+        prefix_to_sids,
+        all_sids,
     ) = load_sid_catalog(
         article_sid_path
     )
 
     validate_catalog_against_model(
-        prefix_to_next=
-            prefix_to_next,
+        all_sids=
+            all_sids,
 
         model=
             model,
@@ -1015,8 +1111,11 @@ def main() -> None:
         sid_to_article=
             sid_to_article,
 
-        prefix_to_next=
-            prefix_to_next,
+        prefix_to_sids=
+            prefix_to_sids,
+
+        all_sids=
+            all_sids,
 
         device=
             device,
