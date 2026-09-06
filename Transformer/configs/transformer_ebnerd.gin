@@ -24,3 +24,17 @@ TransformerLoss.lambda_c1 = 1.0
 TransformerLoss.lambda_c2 = 1.0
 TransformerLoss.lambda_c3 = 1.0
 TransformerLoss.lambda_c4 = 1.0
+
+train.train_path = "datasets/ebnerd/train_sequences.parquet"
+train.validation_path = "datasets/ebnerd/validation_sequences_half.parquet"
+train.save_dir = "out/transformer/ebnerd"
+
+train.batch_size = 128
+train.num_epochs = 30
+train.learning_rate = 0.0001
+train.weight_decay = 0.01
+
+train.gradient_clip_norm = 1.0
+train.num_workers = 0
+train.seed = 42
+train.early_stopping_patience = 5
