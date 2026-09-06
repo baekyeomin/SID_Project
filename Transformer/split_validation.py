@@ -17,7 +17,7 @@ validation_output_path = (
     BASE_DIR
     / "datasets"
     / "ebnerd"
-    / "validation_sequences_new.parquet"
+    / "validation_sequences_half.parquet"
 )
 
 test_output_path = (
