@@ -1,0 +1,26 @@
+NewsSequenceDataset.max_history_length = 20 
+NewsSequenceDataset.drop_empty_history = True 
+NewsSequenceDataset.validate_data = True 
+
+NewsEncoderDecoderTransformer.c1_vocab_size = 25
+NewsEncoderDecoderTransformer.c2_vocab_size = 128
+NewsEncoderDecoderTransformer.c3_vocab_size = 512 
+
+NewsEncoderDecoderTransformer.c4_vocab_size = 28
+
+NewsEncoderDecoderTransformer.d_model = 384
+NewsEncoderDecoderTransformer.num_heads = 6
+
+NewsEncoderDecoderTransformer.d_ff = 1024
+
+
+NewsEncoderDecoderTransformer.num_layers = 4
+
+
+NewsEncoderDecoderTransformer.dropout_rate = 0.1
+NewsEncoderDecoderTransformer.use_sep = True
+
+TransformerLoss.lambda_c1 = 1.0
+TransformerLoss.lambda_c2 = 1.0
+TransformerLoss.lambda_c3 = 1.0
+TransformerLoss.lambda_c4 = 1.0
