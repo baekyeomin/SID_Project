@@ -21,19 +21,19 @@ from data.sequence import (
 from modules.model import NewsEncoderDecoderTransformer
 from modules.loss import TransformerLoss
 
-# 현재 train_transformer.py가 있는 Transformer/ 폴더
+
 BASE_DIR = Path(__file__).resolve().parent
 
-# 실험 재현을 위해 랜덤 시드 고정
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
-
     torch.manual_seed(seed)
 
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+
 
 def resolve_path(path: str) -> Path:
     path_obj = Path(path)
@@ -44,7 +44,6 @@ def resolve_path(path: str) -> Path:
     return BASE_DIR / path_obj
 
 
-# Device
 def get_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -52,170 +51,472 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-# Metric accumulator
 def create_metric_dict() -> Dict[str, float]:
-
     return {
-        "total_loss": 0.0,
-        "c1_loss": 0.0,
-        "c2_loss": 0.0,
-        "c3_loss": 0.0,
-        "c4_loss": 0.0,
+        "preference_loss_sum": 0.0,
+        "tie_loss_sum": 0.0,
 
-        "c1_correct": 0,
-        "c2_correct": 0,
-        "c3_correct": 0,
-        "c4_correct": 0,
-        "full_sid_correct": 0,
+        "positive_score_sum": 0.0,
+        "negative_score_sum": 0.0,
 
-        "num_samples": 0,
+        "positive_prob_sum": 0.0,
+        "negative_prob_sum": 0.0,
+
+        "tie_positive_score_sum": 0.0,
+        "tie_negative_score_sum": 0.0,
+
+        "num_valid_candidates": 0,
+        "num_positive_candidates": 0,
+        "num_negative_candidates": 0,
+
+        "num_tie_pairs": 0,
+        "num_collision_impressions": 0,
+        "num_impressions": 0,
     }
 
-# 한 배치의 loss와 정확도 누적
+
+@torch.no_grad()
+def get_tie_statistics(
+    candidate_sids: Tensor,
+    candidate_labels: Tensor,
+    candidate_mask: Tensor,
+    tie_scores: Tensor,
+) -> Dict[str, float]:
+
+    num_tie_pairs = 0
+    num_collision_impressions = 0
+
+    positive_score_sum = 0.0
+    negative_score_sum = 0.0
+
+    batch_size = candidate_sids.shape[0]
+
+    for batch_idx in range(batch_size):
+
+        valid = candidate_mask[batch_idx].bool()
+
+        sids = candidate_sids[
+            batch_idx
+        ][valid]
+
+        labels = candidate_labels[
+            batch_idx
+        ][valid]
+
+        scores = tie_scores[
+            batch_idx
+        ][valid]
+
+        positive_indices = torch.where(
+            labels == 1
+        )[0]
+
+        negative_indices = torch.where(
+            labels == 0
+        )[0]
+
+        if (
+            positive_indices.numel() == 0
+            or negative_indices.numel() == 0
+        ):
+            continue
+
+        negative_sids = sids[
+            negative_indices
+        ]
+
+        negative_scores = scores[
+            negative_indices
+        ]
+
+        collision_found = False
+
+        for positive_idx in positive_indices:
+
+            positive_sid = sids[
+                positive_idx
+            ]
+
+            positive_score = scores[
+                positive_idx
+            ]
+
+            collision_mask = (
+                negative_sids
+                == positive_sid.unsqueeze(0)
+            ).all(dim=-1)
+
+            pair_count = int(
+                collision_mask.sum().item()
+            )
+
+            if pair_count == 0:
+                continue
+
+            collision_found = True
+            num_tie_pairs += pair_count
+
+            positive_score_sum += float(
+                positive_score.item()
+                * pair_count
+            )
+
+            negative_score_sum += float(
+                negative_scores[
+                    collision_mask
+                ].sum().item()
+            )
+
+        if collision_found:
+            num_collision_impressions += 1
+
+    return {
+        "num_tie_pairs":
+            num_tie_pairs,
+
+        "num_collision_impressions":
+            num_collision_impressions,
+
+        "tie_positive_score_sum":
+            positive_score_sum,
+
+        "tie_negative_score_sum":
+            negative_score_sum,
+    }
+
+
+@torch.no_grad()
 def update_metrics(
     metrics: Dict[str, float],
     loss_output,
     model_output,
-    target_sids: Tensor,
+    candidate_sids: Tensor,
+    candidate_labels: Tensor,
+    candidate_mask: Tensor,
 ) -> None:
-    
-    batch_size = target_sids.shape[0]
 
-    # loss_output은 batch 평균 loss이므로
-    # batch_size를 곱해서 전체 sample 기준으로 누적
+    candidate_labels = candidate_labels.float()
+    candidate_mask = candidate_mask.bool()
 
-    metrics["total_loss"] += (
-        loss_output.total_loss.item()
-        * batch_size
+    positive_mask = (
+        candidate_mask
+        & (candidate_labels == 1)
     )
 
-    metrics["c1_loss"] += (
-        loss_output.c1_loss.item()
-        * batch_size
+    negative_mask = (
+        candidate_mask
+        & (candidate_labels == 0)
     )
 
-    metrics["c2_loss"] += (
-        loss_output.c2_loss.item()
-        * batch_size
+    num_valid = int(
+        candidate_mask.sum().item()
     )
 
-    metrics["c3_loss"] += (
-        loss_output.c3_loss.item()
-        * batch_size
+    num_positive = int(
+        positive_mask.sum().item()
     )
 
-    metrics["c4_loss"] += (
-        loss_output.c4_loss.item()
-        * batch_size
+    num_negative = int(
+        negative_mask.sum().item()
     )
 
-    # Prediction
-    pred_c1 = torch.argmax(
-        model_output.c1_logits,
-        dim=-1,
+    metrics[
+        "preference_loss_sum"
+    ] += (
+        loss_output.preference_loss.item()
+        * num_valid
     )
 
-    pred_c2 = torch.argmax(
-        model_output.c2_logits,
-        dim=-1,
+    candidate_scores = (
+        model_output.candidate_scores
     )
 
-    pred_c3 = torch.argmax(
-        model_output.c3_logits,
-        dim=-1,
+    candidate_probs = torch.exp(
+        candidate_scores
     )
 
-    pred_c4 = torch.argmax(
-        model_output.c4_logits,
-        dim=-1,
+    if num_positive > 0:
+
+        metrics[
+            "positive_score_sum"
+        ] += float(
+            candidate_scores[
+                positive_mask
+            ].sum().item()
+        )
+
+        metrics[
+            "positive_prob_sum"
+        ] += float(
+            candidate_probs[
+                positive_mask
+            ].sum().item()
+        )
+
+    if num_negative > 0:
+
+        metrics[
+            "negative_score_sum"
+        ] += float(
+            candidate_scores[
+                negative_mask
+            ].sum().item()
+        )
+
+        metrics[
+            "negative_prob_sum"
+        ] += float(
+            candidate_probs[
+                negative_mask
+            ].sum().item()
+        )
+
+    tie_stats = get_tie_statistics(
+        candidate_sids=
+            candidate_sids,
+
+        candidate_labels=
+            candidate_labels,
+
+        candidate_mask=
+            candidate_mask,
+
+        tie_scores=
+            model_output.tie_scores,
     )
 
-    # Ground Truth
-    target_c1 = target_sids[:, 0]
-    target_c2 = target_sids[:, 1]
-    target_c3 = target_sids[:, 2]
-    target_c4 = target_sids[:, 3]
-    
-    # Hierarchy accuracy
-    correct_c1 = pred_c1.eq(target_c1)
-    correct_c2 = pred_c2.eq(target_c2)
-    correct_c3 = pred_c3.eq(target_c3)
-    correct_c4 = pred_c4.eq(target_c4)
-
-    metrics["c1_correct"] += (
-        correct_c1.sum().item()
+    num_tie_pairs = int(
+        tie_stats[
+            "num_tie_pairs"
+        ]
     )
 
-    metrics["c2_correct"] += (
-        correct_c2.sum().item()
+    if num_tie_pairs > 0:
+
+        metrics[
+            "tie_loss_sum"
+        ] += (
+            loss_output.tie_loss.item()
+            * num_tie_pairs
+        )
+
+    metrics[
+        "tie_positive_score_sum"
+    ] += tie_stats[
+        "tie_positive_score_sum"
+    ]
+
+    metrics[
+        "tie_negative_score_sum"
+    ] += tie_stats[
+        "tie_negative_score_sum"
+    ]
+
+    metrics[
+        "num_tie_pairs"
+    ] += num_tie_pairs
+
+    metrics[
+        "num_collision_impressions"
+    ] += int(
+        tie_stats[
+            "num_collision_impressions"
+        ]
     )
 
-    metrics["c3_correct"] += (
-        correct_c3.sum().item()
-    )
+    metrics[
+        "num_valid_candidates"
+    ] += num_valid
 
-    metrics["c4_correct"] += (
-        correct_c4.sum().item()
-    )
+    metrics[
+        "num_positive_candidates"
+    ] += num_positive
 
-    # Full SID accuracy
-    # c1,c2,c3,c4를 전부 맞춘 경우에만 correct
+    metrics[
+        "num_negative_candidates"
+    ] += num_negative
 
-    full_correct = (
-        correct_c1
-        & correct_c2
-        & correct_c3
-        & correct_c4
-    )
+    metrics[
+        "num_impressions"
+    ] += candidate_sids.shape[0]
 
-    metrics["full_sid_correct"] += (
-        full_correct.sum().item()
-    )
 
-    metrics["num_samples"] += batch_size
-
-# 누적된 값을 샘플 평균 loss / 정확도 로 변환
 def finalize_metrics(
     metrics: Dict[str, float],
+    loss_fn: TransformerLoss,
 ) -> Dict[str, float]:
 
-    n = metrics["num_samples"]
+    num_valid = int(
+        metrics[
+            "num_valid_candidates"
+        ]
+    )
 
-    if n == 0:
+    num_positive = int(
+        metrics[
+            "num_positive_candidates"
+        ]
+    )
+
+    num_negative = int(
+        metrics[
+            "num_negative_candidates"
+        ]
+    )
+
+    num_tie_pairs = int(
+        metrics[
+            "num_tie_pairs"
+        ]
+    )
+
+    num_impressions = int(
+        metrics[
+            "num_impressions"
+        ]
+    )
+
+    if num_valid == 0:
         raise ValueError(
-            "No samples were processed."
+            "No valid candidates were processed."
         )
+
+    preference_loss = (
+        metrics[
+            "preference_loss_sum"
+        ]
+        / num_valid
+    )
+
+    tie_loss = (
+        metrics[
+            "tie_loss_sum"
+        ]
+        / num_tie_pairs
+        if num_tie_pairs > 0
+        else 0.0
+    )
+
+    positive_score = (
+        metrics[
+            "positive_score_sum"
+        ]
+        / num_positive
+        if num_positive > 0
+        else float("nan")
+    )
+
+    negative_score = (
+        metrics[
+            "negative_score_sum"
+        ]
+        / num_negative
+        if num_negative > 0
+        else float("nan")
+    )
+
+    positive_prob = (
+        metrics[
+            "positive_prob_sum"
+        ]
+        / num_positive
+        if num_positive > 0
+        else float("nan")
+    )
+
+    negative_prob = (
+        metrics[
+            "negative_prob_sum"
+        ]
+        / num_negative
+        if num_negative > 0
+        else float("nan")
+    )
+
+    tie_positive_score = (
+        metrics[
+            "tie_positive_score_sum"
+        ]
+        / num_tie_pairs
+        if num_tie_pairs > 0
+        else float("nan")
+    )
+
+    tie_negative_score = (
+        metrics[
+            "tie_negative_score_sum"
+        ]
+        / num_tie_pairs
+        if num_tie_pairs > 0
+        else float("nan")
+    )
+
+    collision_rate = (
+        metrics[
+            "num_collision_impressions"
+        ]
+        / num_impressions
+        if num_impressions > 0
+        else 0.0
+    )
+
+    total_loss = (
+        loss_fn.lambda_preference
+        * preference_loss
+
+        + loss_fn.lambda_tie
+        * tie_loss
+    )
 
     return {
         "total_loss":
-            metrics["total_loss"] / n,
+            total_loss,
 
-        "c1_loss":
-            metrics["c1_loss"] / n,
+        "preference_loss":
+            preference_loss,
 
-        "c2_loss":
-            metrics["c2_loss"] / n,
+        "tie_loss":
+            tie_loss,
 
-        "c3_loss":
-            metrics["c3_loss"] / n,
+        "positive_score":
+            positive_score,
 
-        "c4_loss":
-            metrics["c4_loss"] / n,
+        "negative_score":
+            negative_score,
 
-        "c1_acc":
-            metrics["c1_correct"] / n,
+        "positive_prob":
+            positive_prob,
 
-        "c2_acc":
-            metrics["c2_correct"] / n,
+        "negative_prob":
+            negative_prob,
 
-        "c3_acc":
-            metrics["c3_correct"] / n,
+        "tie_positive_score":
+            tie_positive_score,
 
-        "c4_acc":
-            metrics["c4_correct"] / n,
+        "tie_negative_score":
+            tie_negative_score,
 
-        "full_sid_acc":
-            metrics["full_sid_correct"] / n,
+        "num_valid_candidates":
+            num_valid,
+
+        "num_positive_candidates":
+            num_positive,
+
+        "num_negative_candidates":
+            num_negative,
+
+        "num_tie_pairs":
+            num_tie_pairs,
+
+        "num_collision_impressions":
+            int(
+                metrics[
+                    "num_collision_impressions"
+                ]
+            ),
+
+        "collision_rate":
+            collision_rate,
     }
 
 
@@ -228,7 +529,6 @@ def train_one_epoch(
     gradient_clip_norm: Optional[float] = 1.0,
 ) -> Dict[str, float]:
 
-    # 학습 모드
     model.train()
 
     metrics = create_metric_dict()
@@ -237,66 +537,122 @@ def train_one_epoch(
 
         history_sids = batch[
             "history_sids"
-        ].to(device)
+        ].to(
+            device,
+            non_blocking=True,
+        )
 
         history_mask = batch[
             "history_mask"
-        ].to(device)
+        ].to(
+            device,
+            non_blocking=True,
+        )
 
-        target_sids = batch[
-            "target_sids"
-        ].to(device)
+        candidate_sids = batch[
+            "candidate_sids"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        candidate_c4 = batch[
+            "candidate_c4"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        candidate_labels = batch[
+            "candidate_labels"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        candidate_mask = batch[
+            "candidate_mask"
+        ].to(
+            device,
+            non_blocking=True,
+        )
 
         optimizer.zero_grad(
             set_to_none=True
         )
 
-        # Forward
         model_output = model(
-            history_sids=history_sids,
-            history_mask=history_mask,
-            target_sids=target_sids,
+            history_sids=
+                history_sids,
+
+            history_mask=
+                history_mask,
+
+            candidate_sids=
+                candidate_sids,
+
+            candidate_c4=
+                candidate_c4,
         )
 
-        # Loss
         loss_output = loss_fn(
-            c1_logits=model_output.c1_logits,
-            c2_logits=model_output.c2_logits,
-            c3_logits=model_output.c3_logits,
-            c4_logits=model_output.c4_logits,
-            target_sids=target_sids,
+            candidate_scores=
+                model_output.candidate_scores,
+
+            tie_scores=
+                model_output.tie_scores,
+
+            candidate_sids=
+                candidate_sids,
+
+            candidate_labels=
+                candidate_labels,
+
+            candidate_mask=
+                candidate_mask,
         )
 
-        # Backpropagation
         loss_output.total_loss.backward()
 
-        # Gradient clipping
-        #
-        # gradient가 지나치게 커지는 것을 방지.
-        # None이면 사용하지 않음.
         if gradient_clip_norm is not None:
 
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
-                max_norm=gradient_clip_norm,
+                max_norm=
+                    gradient_clip_norm,
             )
 
-        # Parameter update
         optimizer.step()
 
-        # Metric
         update_metrics(
-            metrics=metrics,
-            loss_output=loss_output,
-            model_output=model_output,
-            target_sids=target_sids,
+            metrics=
+                metrics,
+
+            loss_output=
+                loss_output,
+
+            model_output=
+                model_output,
+
+            candidate_sids=
+                candidate_sids,
+
+            candidate_labels=
+                candidate_labels,
+
+            candidate_mask=
+                candidate_mask,
         )
 
     return finalize_metrics(
-        metrics
+        metrics=
+            metrics,
+
+        loss_fn=
+            loss_fn,
     )
 
-# Validation
+
 @torch.no_grad()
 def evaluate(
     model: NewsEncoderDecoderTransformer,
@@ -304,11 +660,6 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
 ) -> Dict[str, float]:
-    """
-    Validation dataset에서 loss / accuracy 계산.
-
-    model parameter는 업데이트X
-    """
 
     model.eval()
 
@@ -318,42 +669,105 @@ def evaluate(
 
         history_sids = batch[
             "history_sids"
-        ].to(device)
+        ].to(
+            device,
+            non_blocking=True,
+        )
 
         history_mask = batch[
             "history_mask"
-        ].to(device)
-
-        target_sids = batch[
-            "target_sids"
-        ].to(device)
-
-        # Forward
-        model_output = model(
-            history_sids=history_sids,
-            history_mask=history_mask,
-            target_sids=target_sids,
+        ].to(
+            device,
+            non_blocking=True,
         )
 
-        # Loss
+        candidate_sids = batch[
+            "candidate_sids"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        candidate_c4 = batch[
+            "candidate_c4"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        candidate_labels = batch[
+            "candidate_labels"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        candidate_mask = batch[
+            "candidate_mask"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        model_output = model(
+            history_sids=
+                history_sids,
+
+            history_mask=
+                history_mask,
+
+            candidate_sids=
+                candidate_sids,
+
+            candidate_c4=
+                candidate_c4,
+        )
+
         loss_output = loss_fn(
-            c1_logits=model_output.c1_logits,
-            c2_logits=model_output.c2_logits,
-            c3_logits=model_output.c3_logits,
-            c4_logits=model_output.c4_logits,
-            target_sids=target_sids,
+            candidate_scores=
+                model_output.candidate_scores,
+
+            tie_scores=
+                model_output.tie_scores,
+
+            candidate_sids=
+                candidate_sids,
+
+            candidate_labels=
+                candidate_labels,
+
+            candidate_mask=
+                candidate_mask,
         )
 
         update_metrics(
-            metrics=metrics,
-            loss_output=loss_output,
-            model_output=model_output,
-            target_sids=target_sids,
+            metrics=
+                metrics,
+
+            loss_output=
+                loss_output,
+
+            model_output=
+                model_output,
+
+            candidate_sids=
+                candidate_sids,
+
+            candidate_labels=
+                candidate_labels,
+
+            candidate_mask=
+                candidate_mask,
         )
 
     return finalize_metrics(
-        metrics
+        metrics=
+            metrics,
+
+        loss_fn=
+            loss_fn,
     )
+
 
 def print_metrics(
     split_name: str,
@@ -363,24 +777,52 @@ def print_metrics(
     print(
         f"{split_name} "
         f"Loss={metrics['total_loss']:.6f} | "
-        f"C1={metrics['c1_loss']:.6f} | "
-        f"C2={metrics['c2_loss']:.6f} | "
-        f"C3={metrics['c3_loss']:.6f} | "
-        f"C4={metrics['c4_loss']:.6f}"
+        f"Preference={metrics['preference_loss']:.6f} | "
+        f"Tie={metrics['tie_loss']:.6f}"
     )
 
     print(
         f"{split_name} "
-        f"Acc | "
-        f"C1={metrics['c1_acc']:.4f} | "
-        f"C2={metrics['c2_acc']:.4f} | "
-        f"C3={metrics['c3_acc']:.4f} | "
-        f"C4={metrics['c4_acc']:.4f} | "
-        f"Full SID={metrics['full_sid_acc']:.4f}"
+        f"Score | "
+        f"Positive={metrics['positive_score']:.4f} | "
+        f"Negative={metrics['negative_score']:.4f}"
+    )
+
+    print(
+        f"{split_name} "
+        f"Probability | "
+        f"Positive={metrics['positive_prob']:.6f} | "
+        f"Negative={metrics['negative_prob']:.6f}"
+    )
+
+    print(
+        f"{split_name} "
+        f"Tie score | "
+        f"Positive={metrics['tie_positive_score']:.4f} | "
+        f"Negative={metrics['tie_negative_score']:.4f}"
+    )
+
+    print(
+        f"{split_name} "
+        f"Collision | "
+        f"Pairs={int(metrics['num_tie_pairs']):,} | "
+        f"Impressions="
+        f"{int(metrics['num_collision_impressions']):,} | "
+        f"Rate={metrics['collision_rate']:.4%}"
+    )
+
+    print(
+        f"{split_name} "
+        f"Candidates | "
+        f"Positive="
+        f"{int(metrics['num_positive_candidates']):,} | "
+        f"Negative="
+        f"{int(metrics['num_negative_candidates']):,} | "
+        f"Total="
+        f"{int(metrics['num_valid_candidates']):,}"
     )
 
 
-# Save checkpoint
 def save_checkpoint(
     path: Path,
     model: NewsEncoderDecoderTransformer,
@@ -395,7 +837,8 @@ def save_checkpoint(
     )
 
     checkpoint = {
-        "epoch": epoch,
+        "epoch":
+            epoch,
 
         "model_state_dict":
             model.state_dict(),
@@ -406,8 +849,6 @@ def save_checkpoint(
         "validation_loss":
             validation_loss,
 
-        # 나중에 predict_sid.py에서
-        # 어떤 gin 설정으로 학습했는지 확인 가능
         "gin_config":
             gin.config_str(),
     }
@@ -417,7 +858,7 @@ def save_checkpoint(
         path,
     )
 
-# Main Train
+
 @gin.configurable
 def train(
     train_path: str,
@@ -430,47 +871,24 @@ def train(
     learning_rate: float = 1e-4,
     weight_decay: float = 0.01,
 
-    gradient_clip_norm: Optional[float] = 1.0,
+    gradient_clip_norm: Optional[
+        float
+    ] = 1.0,
 
     num_workers: int = 0,
     seed: int = 42,
 
-    early_stopping_patience: Optional[int] = None,
+    early_stopping_patience: Optional[
+        int
+    ] = None,
 ) -> None:
-    """
-    [트랜스포머 파라미터]
-    
-    train_path: train_sequences.parquet 경로
 
-    validation_path: validation_sequences.parquet 경로
-
-    save_dir: checkpoint 저장 폴더
-
-    batch_size: 한 번에 학습할 sample 수
-
-    num_epochs: 전체 train dataset을 몇 번 반복할지
-
-    learning_rate: AdamW learning rate
-
-    weight_decay: AdamW weight decay
-
-    gradient_clip_norm: gradient clipping.(None이면 사용하지 않음.)
-
-    num_workers: DataLoader worker 수.(Windows에서는 처음에는 0 권장한다고함)
-
-    early_stopping_patience: validation loss가 개선되지 않는 epoch를 몇 번까지 기다릴지.
-    """
-
-    set_seed(
-        seed
-    )
+    set_seed(seed)
 
     device = get_device()
 
     print()
-    print("========================================")
     print("Transformer Training")
-    print("========================================")
     print("Device:", device)
 
     if device.type == "cuda":
@@ -478,7 +896,6 @@ def train(
             "GPU:",
             torch.cuda.get_device_name(0),
         )
-
 
     train_path = resolve_path(
         train_path
@@ -508,28 +925,27 @@ def train(
     )
 
     if not train_path.exists():
-
         raise FileNotFoundError(
             f"Train file not found:\n"
             f"{train_path}"
         )
 
     if not validation_path.exists():
-
         raise FileNotFoundError(
             f"Validation file not found:\n"
             f"{validation_path}"
         )
 
     train_dataset = NewsSequenceDataset(
-        parquet_path=str(train_path),
+        parquet_path=
+            str(train_path),
     )
 
     validation_dataset = NewsSequenceDataset(
-        parquet_path=str(validation_path),
+        parquet_path=
+            str(validation_path),
     )
 
-    print()
     print(
         "Train samples      :",
         f"{len(train_dataset):,}",
@@ -540,17 +956,20 @@ def train(
         f"{len(validation_dataset):,}",
     )
 
-
     train_loader = DataLoader(
-        dataset=train_dataset,
+        dataset=
+            train_dataset,
 
-        batch_size=batch_size,
+        batch_size=
+            batch_size,
 
         shuffle=True,
 
-        num_workers=num_workers,
+        num_workers=
+            num_workers,
 
-        collate_fn=collate_news_sequences,
+        collate_fn=
+            collate_news_sequences,
 
         pin_memory=(
             device.type == "cuda"
@@ -558,43 +977,45 @@ def train(
     )
 
     validation_loader = DataLoader(
-        dataset=validation_dataset,
+        dataset=
+            validation_dataset,
 
-        batch_size=batch_size,
+        batch_size=
+            batch_size,
 
         shuffle=False,
 
-        num_workers=num_workers,
+        num_workers=
+            num_workers,
 
-        collate_fn=collate_news_sequences,
+        collate_fn=
+            collate_news_sequences,
 
         pin_memory=(
             device.type == "cuda"
         ),
     )
 
-    # Model
     model = (
         NewsEncoderDecoderTransformer()
         .to(device)
     )
 
-    # Loss
     loss_fn = (
         TransformerLoss()
         .to(device)
     )
 
-    # Optimizer
     optimizer = AdamW(
         model.parameters(),
 
-        lr=learning_rate,
+        lr=
+            learning_rate,
 
-        weight_decay=weight_decay,
+        weight_decay=
+            weight_decay,
     )
 
-    # Model parameter count : 모델크기 확인용
     total_parameters = sum(
         p.numel()
         for p in model.parameters()
@@ -606,7 +1027,6 @@ def train(
         if p.requires_grad
     )
 
-    print()
     print(
         "Total parameters     :",
         f"{total_parameters:,}",
@@ -618,25 +1038,20 @@ def train(
     )
 
     print()
-
-    # 학습 전 validation loss도 출력
-    print(
-        "========================================"
-    )
-
-    print(
-        "Before Training"
-    )
-
-    print(
-        "========================================"
-    )
+    print("Before Training")
 
     initial_validation_metrics = evaluate(
-        model=model,
-        loss_fn=loss_fn,
-        dataloader=validation_loader,
-        device=device,
+        model=
+            model,
+
+        loss_fn=
+            loss_fn,
+
+        dataloader=
+            validation_loader,
+
+        device=
+            device,
     )
 
     print_metrics(
@@ -644,7 +1059,6 @@ def train(
         initial_validation_metrics,
     )
 
-    # Training state
     best_validation_loss = float(
         "inf"
     )
@@ -656,6 +1070,11 @@ def train(
         exist_ok=True,
     )
 
+    epoch = 0
+    validation_loss = float(
+        "inf"
+    )
+
     for epoch in range(
         1,
         num_epochs + 1,
@@ -663,25 +1082,27 @@ def train(
 
         print()
         print(
-            "========================================"
-        )
-
-        print(
             f"Epoch {epoch}/{num_epochs}"
         )
 
-        print(
-            "========================================"
-        )
-
-        # Train
         train_metrics = train_one_epoch(
-            model=model,
-            loss_fn=loss_fn,
-            dataloader=train_loader,
-            optimizer=optimizer,
-            device=device,
-            gradient_clip_norm=gradient_clip_norm,
+            model=
+                model,
+
+            loss_fn=
+                loss_fn,
+
+            dataloader=
+                train_loader,
+
+            optimizer=
+                optimizer,
+
+            device=
+                device,
+
+            gradient_clip_norm=
+                gradient_clip_norm,
         )
 
         print_metrics(
@@ -689,12 +1110,18 @@ def train(
             train_metrics,
         )
 
-        # Validation
         validation_metrics = evaluate(
-            model=model,
-            loss_fn=loss_fn,
-            dataloader=validation_loader,
-            device=device,
+            model=
+                model,
+
+            loss_fn=
+                loss_fn,
+
+            dataloader=
+                validation_loader,
+
+            device=
+                device,
         )
 
         print_metrics(
@@ -708,26 +1135,25 @@ def train(
             ]
         )
 
-        # 매 epoch checkpoint
-        epoch_checkpoint_path = (
-            save_dir
-            / f"checkpoint_epoch_{epoch}.pt"
-        )
-
         save_checkpoint(
-            path=epoch_checkpoint_path,
-            model=model,
-            optimizer=optimizer,
-            epoch=epoch,
-            validation_loss=validation_loss,
+            path=
+                save_dir
+                / f"checkpoint_epoch_{epoch}.pt",
+
+            model=
+                model,
+
+            optimizer=
+                optimizer,
+
+            epoch=
+                epoch,
+
+            validation_loss=
+                validation_loss,
         )
 
-        # validation total loss 기준 Best checkpoint
-
-        if (
-            validation_loss
-            < best_validation_loss
-        ):
+        if validation_loss < best_validation_loss:
 
             best_validation_loss = (
                 validation_loss
@@ -735,17 +1161,22 @@ def train(
 
             epochs_without_improvement = 0
 
-            best_checkpoint_path = (
-                save_dir
-                / "checkpoint_best.pt"
-            )
-
             save_checkpoint(
-                path=best_checkpoint_path,
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch,
-                validation_loss=validation_loss,
+                path=
+                    save_dir
+                    / "checkpoint_best.pt",
+
+                model=
+                    model,
+
+                optimizer=
+                    optimizer,
+
+                epoch=
+                    epoch,
+
+                validation_loss=
+                    validation_loss,
             )
 
             print(
@@ -762,55 +1193,45 @@ def train(
                 "Validation loss did not improve."
             )
 
-        # Early stopping
         if (
             early_stopping_patience
             is not None
+            and epochs_without_improvement
+            >= early_stopping_patience
         ):
 
-            if (
-                epochs_without_improvement
-                >= early_stopping_patience
-            ):
+            print(
+                f"Early stopping. "
+                f"No validation improvement for "
+                f"{early_stopping_patience} epochs."
+            )
 
-                print()
-                print(
-                    "Early stopping."
-                )
+            break
 
-                print(
-                    f"No validation improvement for "
-                    f"{early_stopping_patience} epochs."
-                )
-
-                break
-
-    # Final checkpoint
     final_checkpoint_path = (
         save_dir
         / "checkpoint_final.pt"
     )
 
     save_checkpoint(
-        path=final_checkpoint_path,
-        model=model,
-        optimizer=optimizer,
-        epoch=epoch,
-        validation_loss=validation_loss,
+        path=
+            final_checkpoint_path,
+
+        model=
+            model,
+
+        optimizer=
+            optimizer,
+
+        epoch=
+            epoch,
+
+        validation_loss=
+            validation_loss,
     )
 
     print()
-    print(
-        "========================================"
-    )
-
-    print(
-        "Training Finished"
-    )
-
-    print(
-        "========================================"
-    )
+    print("Training Finished")
 
     print(
         "Best validation loss:",
@@ -819,7 +1240,8 @@ def train(
 
     print(
         "Best checkpoint:",
-        save_dir / "checkpoint_best.pt",
+        save_dir
+        / "checkpoint_best.pt",
     )
 
     print(
@@ -841,22 +1263,15 @@ def main() -> None:
         "--config",
         type=str,
         required=True,
-        help=(
-            "Gin config path. "
-            "Example: "
-            "configs/transformer_ebnerd.gin"
-        ),
     )
 
     args = parser.parse_args()
-
 
     config_path = resolve_path(
         args.config
     )
 
     if not config_path.exists():
-
         raise FileNotFoundError(
             f"Gin config not found:\n"
             f"{config_path}"

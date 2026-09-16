@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import gin
 import pandas as pd
@@ -20,8 +21,6 @@ from modules.model import NewsEncoderDecoderTransformer
 
 
 BASE_DIR = Path(__file__).resolve().parent
-
-SID = Tuple[int, int, int, int]
 
 
 def resolve_path(path: str) -> Path:
@@ -53,478 +52,6 @@ def normalize_article_id(article_id):
     return str(article_id)
 
 
-def load_sid_catalog(
-    article_sid_path: Path,
-) -> Tuple[
-    Dict[SID, str],
-    Dict[Tuple[int, ...], List[SID]],
-    List[SID],
-]:
-
-    if not article_sid_path.exists():
-        raise FileNotFoundError(
-            f"Article SID file not found:\n"
-            f"{article_sid_path}"
-        )
-
-    df = pd.read_parquet(
-        article_sid_path
-    )
-
-    required_columns = [
-        "c1",
-        "c2",
-        "c3",
-        "c4",
-    ]
-
-    missing_columns = [
-        col
-        for col in required_columns
-        if col not in df.columns
-    ]
-
-    if missing_columns:
-        raise ValueError(
-            f"Missing SID columns: {missing_columns}"
-        )
-
-    if "article_id" in df.columns:
-        article_id_column = "article_id"
-
-    elif "news_id" in df.columns:
-        article_id_column = "news_id"
-
-    else:
-        raise ValueError(
-            "article_semantic_ids.parquet에 "
-            "article_id 또는 news_id column이 없습니다."
-        )
-
-    duplicate_counts = (
-        df.groupby(
-            [
-                "c1",
-                "c2",
-                "c3",
-                "c4",
-            ]
-        )
-        .size()
-    )
-
-    duplicate_sid_count = int(
-        (
-            duplicate_counts > 1
-        ).sum()
-    )
-
-    if duplicate_sid_count > 0:
-        raise ValueError(
-            f"c4까지 포함했는데도 동일한 full SID를 가진 기사가 "
-            f"{duplicate_sid_count}개 SID 그룹에서 발견되었습니다."
-        )
-
-    df = (
-        df.sort_values(
-            [
-                "c1",
-                "c2",
-                "c3",
-                "c4",
-            ]
-        )
-        .reset_index(drop=True)
-    )
-
-    sid_to_article: Dict[
-        SID,
-        str,
-    ] = {}
-
-    prefix_to_sids: Dict[
-        Tuple[int, ...],
-        List[SID],
-    ] = {}
-
-    all_sids: List[SID] = []
-
-    for _, row in df.iterrows():
-
-        sid = (
-            int(row["c1"]),
-            int(row["c2"]),
-            int(row["c3"]),
-            int(row["c4"]),
-        )
-
-        article_id = normalize_article_id(
-            row[article_id_column]
-        )
-
-        sid_to_article[sid] = (
-            article_id
-        )
-
-        all_sids.append(
-            sid
-        )
-
-        for prefix_length in [
-            1,
-            2,
-            3,
-        ]:
-
-            prefix = sid[
-                :prefix_length
-            ]
-
-            if prefix not in prefix_to_sids:
-                prefix_to_sids[
-                    prefix
-                ] = []
-
-            prefix_to_sids[
-                prefix
-            ].append(
-                sid
-            )
-
-    print()
-    print("SID Catalog")
-    print(
-        "Articles:",
-        f"{len(df):,}",
-    )
-    print(
-        "Unique full SIDs:",
-        f"{len(sid_to_article):,}",
-    )
-    print(
-        "Duplicated full SIDs:",
-        duplicate_sid_count,
-    )
-
-    return (
-        sid_to_article,
-        prefix_to_sids,
-        all_sids,
-    )
-
-
-def validate_catalog_against_model(
-    all_sids: List[SID],
-    model: NewsEncoderDecoderTransformer,
-) -> None:
-
-    if len(all_sids) == 0:
-        raise ValueError(
-            "SID catalog is empty."
-        )
-
-    vocab_sizes = [
-        model.c1_vocab_size,
-        model.c2_vocab_size,
-        model.c3_vocab_size,
-        model.c4_vocab_size,
-    ]
-
-    for level in range(4):
-
-        codes = [
-            sid[level]
-            for sid in all_sids
-        ]
-
-        min_code = min(
-            codes
-        )
-
-        max_code = max(
-            codes
-        )
-
-        if min_code < 0:
-            raise ValueError(
-                f"Negative SID found "
-                f"at level c{level + 1}."
-            )
-
-        if (
-            max_code
-            >= vocab_sizes[level]
-        ):
-            raise ValueError(
-                f"SID catalog contains "
-                f"c{level + 1}={max_code}, "
-                f"but model vocab size is "
-                f"{vocab_sizes[level]}."
-            )
-
-
-def find_nearest_existing_sid(
-    predicted_sid: SID,
-    sid_to_article: Dict[SID, str],
-    prefix_to_sids: Dict[
-        Tuple[int, ...],
-        List[SID],
-    ],
-    all_sids: List[SID],
-) -> Tuple[
-    SID,
-    int,
-]:
-
-    # distance = 4 - longest common prefix length
-
-    if predicted_sid in sid_to_article:
-        return (
-            predicted_sid,
-            0,
-        )
-
-    prefix3 = (
-        predicted_sid[:3]
-    )
-
-    if prefix3 in prefix_to_sids:
-        return (
-            prefix_to_sids[
-                prefix3
-            ][0],
-            1,
-        )
-
-    prefix2 = (
-        predicted_sid[:2]
-    )
-
-    if prefix2 in prefix_to_sids:
-        return (
-            prefix_to_sids[
-                prefix2
-            ][0],
-            2,
-        )
-
-    prefix1 = (
-        predicted_sid[:1]
-    )
-
-    if prefix1 in prefix_to_sids:
-        return (
-            prefix_to_sids[
-                prefix1
-            ][0],
-            3,
-        )
-
-    return (
-        all_sids[0],
-        4,
-    )
-
-
-@torch.no_grad()
-def unconstrained_beam_search_single(
-    model: NewsEncoderDecoderTransformer,
-    encoder_hidden_states: Tensor,
-    encoder_attention_mask: Tensor,
-    beam_size: int = 20,
-    top_k: int = 10,
-) -> List[
-    Tuple[
-        SID,
-        float,
-    ]
-]:
-
-    if beam_size <= 0:
-        raise ValueError(
-            "beam_size must be > 0."
-        )
-
-    if top_k <= 0:
-        raise ValueError(
-            "top_k must be > 0."
-        )
-
-    keep_size = max(
-        beam_size,
-        top_k,
-    )
-
-    beams: List[
-        Tuple[
-            Tuple[int, ...],
-            float,
-        ]
-    ] = [
-        (
-            (),
-            0.0,
-        )
-    ]
-
-    device = (
-        encoder_hidden_states.device
-    )
-
-    # catalog와 관계없이 c1 → c2 → c3 → c4 생성
-    for level in range(4):
-
-        num_beams = len(
-            beams
-        )
-
-        repeated_encoder_hidden = (
-            encoder_hidden_states.expand(
-                num_beams,
-                -1,
-                -1,
-            )
-        )
-
-        repeated_encoder_mask = (
-            encoder_attention_mask.expand(
-                num_beams,
-                -1,
-            )
-        )
-
-        if level == 0:
-
-            prefix_tensor = None
-
-        else:
-
-            prefix_tensor = (
-                torch.tensor(
-                    [
-                        list(prefix)
-                        for prefix, _
-                        in beams
-                    ],
-                    dtype=torch.long,
-                    device=device,
-                )
-            )
-
-        logits = (
-            model.next_token_logits(
-                encoder_hidden_states=
-                    repeated_encoder_hidden,
-
-                encoder_attention_mask=
-                    repeated_encoder_mask,
-
-                prefix_sids=
-                    prefix_tensor,
-            )
-        )
-
-        log_probs = (
-            torch.log_softmax(
-                logits,
-                dim=-1,
-            )
-        )
-
-        candidates: List[
-            Tuple[
-                Tuple[int, ...],
-                float,
-            ]
-        ] = []
-
-        vocab_size = (
-            log_probs.shape[-1]
-        )
-
-        local_k = min(
-            keep_size,
-            vocab_size,
-        )
-
-        for beam_idx, (
-            prefix,
-            previous_score,
-        ) in enumerate(
-            beams
-        ):
-
-            top_values, top_codes = (
-                torch.topk(
-                    log_probs[
-                        beam_idx
-                    ],
-                    k=local_k,
-                )
-            )
-
-            for j in range(
-                local_k
-            ):
-
-                next_code = int(
-                    top_codes[j].item()
-                )
-
-                next_score = (
-                    previous_score
-                    + float(
-                        top_values[
-                            j
-                        ].item()
-                    )
-                )
-
-                next_prefix = (
-                    prefix
-                    + (next_code,)
-                )
-
-                candidates.append(
-                    (
-                        next_prefix,
-                        next_score,
-                    )
-                )
-
-        candidates.sort(
-            key=lambda x: x[1],
-            reverse=True,
-        )
-
-        beams = (
-            candidates[
-                :keep_size
-            ]
-        )
-
-    results = []
-
-    for sid, score in beams:
-
-        if len(sid) != 4:
-            continue
-
-        results.append(
-            (
-                (
-                    int(sid[0]),
-                    int(sid[1]),
-                    int(sid[2]),
-                    int(sid[3]),
-                ),
-                score,
-            )
-        )
-
-    return results
-
-
 def load_checkpoint(
     checkpoint_path: Path,
     model: NewsEncoderDecoderTransformer,
@@ -543,15 +70,9 @@ def load_checkpoint(
     )
 
     if (
-        isinstance(
-            checkpoint,
-            dict,
-        )
-        and
-        "model_state_dict"
-        in checkpoint
+        isinstance(checkpoint, dict)
+        and "model_state_dict" in checkpoint
     ):
-
         model.load_state_dict(
             checkpoint[
                 "model_state_dict"
@@ -559,7 +80,6 @@ def load_checkpoint(
         )
 
     else:
-
         model.load_state_dict(
             checkpoint
         )
@@ -567,31 +87,160 @@ def load_checkpoint(
     return checkpoint
 
 
+def has_positive_negative_collision(
+    candidate_sids: Tensor,
+    candidate_labels: Tensor,
+) -> bool:
+
+    positive_indices = torch.where(
+        candidate_labels == 1
+    )[0]
+
+    negative_indices = torch.where(
+        candidate_labels == 0
+    )[0]
+
+    if (
+        positive_indices.numel() == 0
+        or negative_indices.numel() == 0
+    ):
+        return False
+
+    positive_sids = candidate_sids[
+        positive_indices
+    ]
+
+    negative_sids = candidate_sids[
+        negative_indices
+    ]
+
+    for positive_sid in positive_sids:
+
+        collision = (
+            negative_sids
+            == positive_sid.unsqueeze(0)
+        ).all(dim=-1)
+
+        if collision.any():
+            return True
+
+    return False
+
+
+def get_collision_group_sizes(
+    candidate_sids: Tensor,
+) -> Dict[tuple, int]:
+
+    counts: Dict[tuple, int] = {}
+
+    for sid in candidate_sids:
+
+        key = tuple(
+            int(v)
+            for v in sid.tolist()
+        )
+
+        counts[key] = (
+            counts.get(key, 0)
+            + 1
+        )
+
+    return counts
+
+
+def rank_candidates(
+    candidate_scores: Tensor,
+    tie_scores: Tensor,
+    candidate_sids: Tensor,
+) -> List[int]:
+
+    num_candidates = (
+        candidate_scores.shape[0]
+    )
+
+    order = sorted(
+        range(num_candidates),
+        key=lambda idx: float(
+            candidate_scores[
+                idx
+            ].item()
+        ),
+        reverse=True,
+    )
+
+    sid_to_positions: Dict[
+        tuple,
+        List[int],
+    ] = {}
+
+    for position, candidate_idx in enumerate(
+        order
+    ):
+
+        sid = tuple(
+            int(v)
+            for v in candidate_sids[
+                candidate_idx
+            ].tolist()
+        )
+
+        sid_to_positions.setdefault(
+            sid,
+            [],
+        ).append(
+            position
+        )
+
+    for positions in sid_to_positions.values():
+
+        if len(positions) <= 1:
+            continue
+
+        candidate_indices = [
+            order[position]
+            for position in positions
+        ]
+
+        candidate_indices.sort(
+            key=lambda idx: float(
+                tie_scores[
+                    idx
+                ].item()
+            ),
+            reverse=True,
+        )
+
+        for position, candidate_idx in zip(
+            positions,
+            candidate_indices,
+        ):
+
+            order[position] = (
+                candidate_idx
+            )
+
+    return order
+
+
 @torch.no_grad()
 def predict(
     model: NewsEncoderDecoderTransformer,
     dataloader: DataLoader,
-
-    sid_to_article: Dict[
-        SID,
-        str,
-    ],
-
-    prefix_to_sids: Dict[
-        Tuple[int, ...],
-        List[SID],
-    ],
-
-    all_sids: List[SID],
-
     device: torch.device,
-    beam_size: int,
-    top_k: int,
-) -> pd.DataFrame:
+) -> tuple[
+    pd.DataFrame,
+    Dict[str, float],
+]:
 
     model.eval()
 
     prediction_rows = []
+
+    num_impressions = 0
+    num_correct = 0
+
+    num_collision_impressions = 0
+    num_collision_correct = 0
 
     sample_index = 0
 
@@ -599,101 +248,208 @@ def predict(
         dataloader
     ):
 
-        history_sids = (
-            batch[
-                "history_sids"
-            ].to(device)
+        history_sids = batch[
+            "history_sids"
+        ].to(
+            device,
+            non_blocking=True,
         )
 
-        history_mask = (
-            batch[
-                "history_mask"
-            ].to(device)
+        history_mask = batch[
+            "history_mask"
+        ].to(
+            device,
+            non_blocking=True,
         )
 
-        # target은 SID 생성에는 사용하지 않고 평가용으로만 저장
-        target_sids = (
-            batch[
-                "target_sids"
-            ]
+        candidate_sids = batch[
+            "candidate_sids"
+        ].to(
+            device,
+            non_blocking=True,
         )
 
-        encoder_output = (
-            model.encode(
-                history_sids=
-                    history_sids,
+        candidate_c4 = batch[
+            "candidate_c4"
+        ].to(
+            device,
+            non_blocking=True,
+        )
 
-                history_mask=
-                    history_mask,
-            )
+        candidate_labels = batch[
+            "candidate_labels"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        candidate_mask = batch[
+            "candidate_mask"
+        ].to(
+            device,
+            non_blocking=True,
+        )
+
+        model_output = model(
+            history_sids=
+                history_sids,
+
+            history_mask=
+                history_mask,
+
+            candidate_sids=
+                candidate_sids,
+
+            candidate_c4=
+                candidate_c4,
         )
 
         batch_size = (
-            history_sids.shape[0]
+            candidate_sids.shape[0]
         )
 
         for i in range(
             batch_size
         ):
 
-            sample_encoder_hidden = (
-                encoder_output
-                .hidden_states[
-                    i:i + 1
-                ]
+            valid = candidate_mask[
+                i
+            ]
+
+            sids = candidate_sids[
+                i
+            ][valid]
+
+            c4_values = candidate_c4[
+                i
+            ][valid]
+
+            labels = candidate_labels[
+                i
+            ][valid]
+
+            scores = (
+                model_output
+                .candidate_scores[
+                    i
+                ][valid]
             )
 
-            sample_encoder_mask = (
-                encoder_output
-                .attention_mask[
-                    i:i + 1
-                ]
+            c1_log_probs = (
+                model_output
+                .c1_log_probs[
+                    i
+                ][valid]
             )
 
-            generated_candidates = (
-                unconstrained_beam_search_single(
-                    model=model,
+            c2_log_probs = (
+                model_output
+                .c2_log_probs[
+                    i
+                ][valid]
+            )
 
-                    encoder_hidden_states=
-                        sample_encoder_hidden,
+            c3_log_probs = (
+                model_output
+                .c3_log_probs[
+                    i
+                ][valid]
+            )
 
-                    encoder_attention_mask=
-                        sample_encoder_mask,
+            tie_scores = (
+                model_output
+                .tie_scores[
+                    i
+                ][valid]
+            )
 
-                    beam_size=
-                        beam_size,
+            num_candidates = (
+                sids.shape[0]
+            )
 
-                    top_k=
-                        top_k,
+            if num_candidates == 0:
+                continue
+
+            article_ids = (
+                batch[
+                    "candidate_article_ids"
+                ][i]
+            )
+
+            if article_ids is None:
+                raise ValueError(
+                    "candidate_article_ids is required."
+                )
+
+            if (
+                len(article_ids)
+                != num_candidates
+            ):
+                raise ValueError(
+                    f"candidate_article_ids length mismatch "
+                    f"at sample {sample_index}: "
+                    f"{len(article_ids)} vs "
+                    f"{num_candidates}"
+                )
+
+            order = rank_candidates(
+                candidate_scores=
+                    scores,
+
+                tie_scores=
+                    tie_scores,
+
+                candidate_sids=
+                    sids,
+            )
+
+            top_index = order[
+                0
+            ]
+
+            is_correct = bool(
+                labels[
+                    top_index
+                ].item()
+                == 1
+            )
+
+            collision = (
+                has_positive_negative_collision(
+                    candidate_sids=
+                        sids,
+
+                    candidate_labels=
+                        labels,
                 )
             )
 
-            target_sid_tensor = (
-                target_sids[i]
-            )
+            num_impressions += 1
 
-            target_sid = (
-                int(
-                    target_sid_tensor[0]
-                ),
-                int(
-                    target_sid_tensor[1]
-                ),
-                int(
-                    target_sid_tensor[2]
-                ),
-                int(
-                    target_sid_tensor[3]
-                ),
-            )
+            if is_correct:
+                num_correct += 1
 
-            target_article_id = (
-                normalize_article_id(
-                    batch[
-                        "target_article_ids"
-                    ][i]
+            if collision:
+
+                num_collision_impressions += 1
+
+                if is_correct:
+                    num_collision_correct += 1
+
+            collision_group_sizes = (
+                get_collision_group_sizes(
+                    sids
                 )
             )
+
+            rank_by_candidate = {
+                candidate_idx: rank
+                for rank, candidate_idx
+                in enumerate(
+                    order,
+                    start=1,
+                )
+            }
 
             impression_id = (
                 batch[
@@ -713,49 +469,23 @@ def predict(
                 ][i]
             )
 
-            used_article_ids = set()
+            for candidate_idx in range(
+                num_candidates
+            ):
 
-            rank = 1
+                sid = tuple(
+                    int(v)
+                    for v in sids[
+                        candidate_idx
+                    ].tolist()
+                )
 
-            for (
-                generated_sid,
-                log_score,
-            ) in generated_candidates:
-
-                (
-                    matched_sid,
-                    sid_distance,
-                ) = (
-                    find_nearest_existing_sid(
-                        predicted_sid=
-                            generated_sid,
-
-                        sid_to_article=
-                            sid_to_article,
-
-                        prefix_to_sids=
-                            prefix_to_sids,
-
-                        all_sids=
-                            all_sids,
+                article_id = (
+                    normalize_article_id(
+                        article_ids[
+                            candidate_idx
+                        ]
                     )
-                )
-
-                predicted_article_id = (
-                    sid_to_article[
-                        matched_sid
-                    ]
-                )
-
-                # 여러 generated SID가 같은 기사로 매핑되면 중복 추천 제거
-                if (
-                    predicted_article_id
-                    in used_article_ids
-                ):
-                    continue
-
-                used_article_ids.add(
-                    predicted_article_id
                 )
 
                 prediction_rows.append(
@@ -775,68 +505,90 @@ def predict(
                         "impression_time":
                             impression_time,
 
-                        "target_article_id":
-                            target_article_id,
+                        "article_id":
+                            article_id,
 
-                        "target_c1":
-                            target_sid[0],
+                        "c1":
+                            sid[0],
 
-                        "target_c2":
-                            target_sid[1],
+                        "c2":
+                            sid[1],
 
-                        "target_c3":
-                            target_sid[2],
+                        "c3":
+                            sid[2],
 
-                        "target_c4":
-                            target_sid[3],
+                        "c4":
+                            int(
+                                c4_values[
+                                    candidate_idx
+                                ].item()
+                            ),
+
+                        "label":
+                            float(
+                                labels[
+                                    candidate_idx
+                                ].item()
+                            ),
+
+                        "candidate_score":
+                            float(
+                                scores[
+                                    candidate_idx
+                                ].item()
+                            ),
+
+                        "c1_log_prob":
+                            float(
+                                c1_log_probs[
+                                    candidate_idx
+                                ].item()
+                            ),
+
+                        "c2_log_prob":
+                            float(
+                                c2_log_probs[
+                                    candidate_idx
+                                ].item()
+                            ),
+
+                        "c3_log_prob":
+                            float(
+                                c3_log_probs[
+                                    candidate_idx
+                                ].item()
+                            ),
+
+                        "tie_score":
+                            float(
+                                tie_scores[
+                                    candidate_idx
+                                ].item()
+                            ),
+
+                        "collision_group_size":
+                            collision_group_sizes[
+                                sid
+                            ],
 
                         "rank":
-                            rank,
+                            rank_by_candidate[
+                                candidate_idx
+                            ],
 
-                        # Transformer가 실제 생성한 SID
-                        "pred_c1":
-                            generated_sid[0],
+                        "is_top1":
+                            rank_by_candidate[
+                                candidate_idx
+                            ]
+                            == 1,
 
-                        "pred_c2":
-                            generated_sid[1],
+                        "top1_correct":
+                            is_correct,
 
-                        "pred_c3":
-                            generated_sid[2],
-
-                        "pred_c4":
-                            generated_sid[3],
-
-                        # 실제 기사 catalog에서 찾은 가장 가까운 SID
-                        "matched_c1":
-                            matched_sid[0],
-
-                        "matched_c2":
-                            matched_sid[1],
-
-                        "matched_c3":
-                            matched_sid[2],
-
-                        "matched_c4":
-                            matched_sid[3],
-
-                        "pred_article_id":
-                            predicted_article_id,
-
-                        "sid_distance":
-                            sid_distance,
-
-                        "exact_sid_match":
-                            sid_distance == 0,
-
-                        "log_score":
-                            log_score,
+                        "has_positive_negative_collision":
+                            collision,
                     }
                 )
-
-                rank += 1
-
-                if rank > top_k:
-                    break
 
             sample_index += 1
 
@@ -846,17 +598,117 @@ def predict(
             f"{len(dataloader)}"
         )
 
-    return pd.DataFrame(
-        prediction_rows
+    top1_accuracy = (
+        num_correct
+        / num_impressions
+        if num_impressions > 0
+        else 0.0
     )
+
+    collision_rate = (
+        num_collision_impressions
+        / num_impressions
+        if num_impressions > 0
+        else 0.0
+    )
+
+    collision_top1_accuracy = (
+        num_collision_correct
+        / num_collision_impressions
+        if num_collision_impressions > 0
+        else float("nan")
+    )
+
+    metrics = {
+        "num_impressions":
+            num_impressions,
+
+        "num_correct":
+            num_correct,
+
+        "top1_accuracy":
+            top1_accuracy,
+
+        "num_collision_impressions":
+            num_collision_impressions,
+
+        "collision_rate":
+            collision_rate,
+
+        "num_collision_correct":
+            num_collision_correct,
+
+        "collision_top1_accuracy":
+            collision_top1_accuracy,
+    }
+
+    return (
+        pd.DataFrame(
+            prediction_rows
+        ),
+        metrics,
+    )
+
+
+def print_metrics(
+    metrics: Dict[str, float],
+) -> None:
+
+    print()
+
+    print(
+        "Impressions:",
+        f"{int(metrics['num_impressions']):,}",
+    )
+
+    print(
+        "Correct Top-1:",
+        f"{int(metrics['num_correct']):,}",
+    )
+
+    print(
+        "Top-1 Accuracy:",
+        f"{metrics['top1_accuracy']:.4%}",
+    )
+
+    print(
+        "Collision impressions:",
+        f"{int(metrics['num_collision_impressions']):,}",
+    )
+
+    print(
+        "Collision rate:",
+        f"{metrics['collision_rate']:.4%}",
+    )
+
+    collision_accuracy = (
+        metrics[
+            "collision_top1_accuracy"
+        ]
+    )
+
+    if math.isnan(
+        collision_accuracy
+    ):
+
+        print(
+            "Collision Top-1 Accuracy: N/A"
+        )
+
+    else:
+
+        print(
+            "Collision Top-1 Accuracy:",
+            f"{collision_accuracy:.4%}",
+        )
 
 
 def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Predict next-news Semantic IDs "
-            "and map them to nearest existing article SID."
+            "Evaluate candidate news ranking "
+            "using Semantic-ID preference scores."
         )
     )
 
@@ -885,20 +737,11 @@ def main() -> None:
     )
 
     parser.add_argument(
-        "--article_sid_path",
-        type=str,
-        default=(
-            "datasets/ebnerd/"
-            "article_semantic_ids.parquet"
-        ),
-    )
-
-    parser.add_argument(
         "--output_path",
         type=str,
         default=(
             "out/transformer/ebnerd/"
-            "test_predictions.parquet"
+            "test_candidate_scores.parquet"
         ),
     )
 
@@ -906,18 +749,6 @@ def main() -> None:
         "--batch_size",
         type=int,
         default=64,
-    )
-
-    parser.add_argument(
-        "--beam_size",
-        type=int,
-        default=20,
-    )
-
-    parser.add_argument(
-        "--top_k",
-        type=int,
-        default=10,
     )
 
     parser.add_argument(
@@ -938,10 +769,6 @@ def main() -> None:
 
     test_path = resolve_path(
         args.test_path
-    )
-
-    article_sid_path = resolve_path(
-        args.article_sid_path
     )
 
     output_path = resolve_path(
@@ -966,12 +793,6 @@ def main() -> None:
             f"{test_path}"
         )
 
-    if not article_sid_path.exists():
-        raise FileNotFoundError(
-            f"Article SID file not found:\n"
-            f"{article_sid_path}"
-        )
-
     gin.parse_config_file(
         str(config_path),
         skip_unknown=True,
@@ -981,7 +802,7 @@ def main() -> None:
 
     print()
     print(
-        "Transformer SID Prediction"
+        "Candidate Ranking Evaluation"
     )
 
     print(
@@ -999,26 +820,10 @@ def main() -> None:
         checkpoint_path,
     )
 
-    print(
-        "Article SID:",
-        article_sid_path,
-    )
-
-    print(
-        "Beam size:",
-        args.beam_size,
-    )
-
-    print(
-        "Top-K:",
-        args.top_k,
-    )
-
     test_dataset = (
         NewsSequenceDataset(
-            parquet_path=str(
-                test_path
-            ),
+            parquet_path=
+                str(test_path),
         )
     )
 
@@ -1069,62 +874,26 @@ def main() -> None:
     )
 
     if (
-        isinstance(
-            checkpoint,
-            dict,
-        )
-        and
-        "epoch"
-        in checkpoint
+        isinstance(checkpoint, dict)
+        and "epoch" in checkpoint
     ):
 
         print(
-            "Best epoch:",
+            "Epoch:",
             checkpoint[
                 "epoch"
             ],
         )
 
-    (
-        sid_to_article,
-        prefix_to_sids,
-        all_sids,
-    ) = load_sid_catalog(
-        article_sid_path
-    )
-
-    validate_catalog_against_model(
-        all_sids=
-            all_sids,
-
-        model=
-            model,
-    )
-
-    predictions_df = predict(
+    predictions_df, metrics = predict(
         model=
             model,
 
         dataloader=
             test_loader,
 
-        sid_to_article=
-            sid_to_article,
-
-        prefix_to_sids=
-            prefix_to_sids,
-
-        all_sids=
-            all_sids,
-
         device=
             device,
-
-        beam_size=
-            args.beam_size,
-
-        top_k=
-            args.top_k,
     )
 
     output_path.parent.mkdir(
@@ -1137,9 +906,14 @@ def main() -> None:
         index=False,
     )
 
+    print_metrics(
+        metrics
+    )
+
     print()
+
     print(
-        "Predictions saved:",
+        "Candidate scores saved:",
         output_path,
     )
 
