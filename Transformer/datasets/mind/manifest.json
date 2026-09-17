@@ -1,0 +1,22 @@
+{
+  "dataset": "MIND-small",
+  "source_dir": "mind_revalidation_grid_r2/lambda_com/lambda_com_2__c21024_embed_dim32_c31024_quantizerSTE_normalizeFalse_lambda_cb0p5",
+  "rqvae_config": {
+    "latent_dim": 32,
+    "c2_size": 1024,
+    "c3_size": 1024,
+    "quantizer": "STE",
+    "normalize": false,
+    "lambda_cb": 0.5,
+    "lambda_com": 2,
+    "lambda_uniq": 0.1,
+    "uniqueness_margin": 0.5,
+    "collision_rate_pct": 14.22
+  },
+  "semantic_id_count": 65238,
+  "train_impressions": 156965,
+  "validation_impressions": 73152,
+  "train_source": "MINDsmall_train/behaviors.tsv",
+  "validation_source": "MINDsmall_dev/behaviors.tsv",
+  "generated_at": "2026-09-17T03:58:08.703729Z"
+}
