@@ -41,7 +41,7 @@ train.train_path = "/home/ubuntu/shared/datasets/ebnerd/train_sequences_1pos4neg
 train.validation_path = "/home/ubuntu/shared/datasets/ebnerd/validation_sequences_1pos4neg_half.parquet"
 
 # 모델 checkpoint 저장 위치
-train.save_dir = "out/transformer/ebnerd"
+train.save_dir = "out/ebnerd"
 
 
 # Training hyperparameters --------------

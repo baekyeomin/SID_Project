@@ -18,7 +18,7 @@ TransformerLoss.lambda_preference = 1.0
 
 train.train_path = "/home/ubuntu/shared/datasets/mind/train_sequences_1pos4neg.parquet"
 train.validation_path = "/home/ubuntu/shared/datasets/mind/validation_sequences_1pos4neg_half.parquet"
-train.save_dir = "out/transformer/mind"
+train.save_dir = "out/mind"
 
 train.batch_size = 128
 train.num_epochs = 30
