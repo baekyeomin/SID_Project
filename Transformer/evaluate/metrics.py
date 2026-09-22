@@ -3,12 +3,7 @@ Top-1 Accuracy: 최종 1위가 클릭 기사인지. 교수님이 말씀하신 �
 AUC: positive가 negative보다 위에 오는 비율.
 MRR: 첫 positive가 얼마나 위에 있는지.
 nDCG@5 / nDCG@10: top-K 전체 순위 품질.
-Collision Rate: positive와 negative가 같은 (c1,c2,c3)인 impression 비율.
-Collision Top-1 / AUC / MRR / nDCG: collision이 실제 발생한 어려운 케이스에서 성능.
-Tie Pair Accuracy: 같은 (c1,c2,c3)인 positive-negative 쌍에서 tie_score(pos) > tie_score(neg)가 얼마나 자주 성립하는지.
-Semantic AUC: tie 적용 전 candidate_score만 사용한 AUC. 최종 AUC와 비교하면 tie-breaking 효과를 볼 수 있음.
 '''
-
 
 from __future__ import annotations
 
@@ -37,18 +32,11 @@ def auc_from_scores(
     labels: np.ndarray,
     scores: np.ndarray,
 ) -> Optional[float]:
-    positive_scores = scores[
-        labels == 1
-    ]
 
-    negative_scores = scores[
-        labels == 0
-    ]
+    positive_scores = scores[labels == 1]
+    negative_scores = scores[labels == 0]
 
-    if (
-        len(positive_scores) == 0
-        or len(negative_scores) == 0
-    ):
+    if len(positive_scores) == 0 or len(negative_scores) == 0:
         return None
 
     comparisons = (
@@ -56,13 +44,8 @@ def auc_from_scores(
         - negative_scores[None, :]
     )
 
-    wins = (
-        comparisons > 0
-    ).sum()
-
-    ties = (
-        comparisons == 0
-    ).sum()
+    wins = (comparisons > 0).sum()
+    ties = (comparisons == 0).sum()
 
     total_pairs = (
         len(positive_scores)
@@ -70,55 +53,7 @@ def auc_from_scores(
     )
 
     return float(
-        (
-            wins
-            + 0.5 * ties
-        )
-        / total_pairs
-    )
-
-
-def auc_from_ranks(
-    labels: np.ndarray,
-    ranks: np.ndarray,
-) -> Optional[float]:
-    positive_ranks = ranks[
-        labels == 1
-    ]
-
-    negative_ranks = ranks[
-        labels == 0
-    ]
-
-    if (
-        len(positive_ranks) == 0
-        or len(negative_ranks) == 0
-    ):
-        return None
-
-    comparisons = (
-        positive_ranks[:, None]
-        - negative_ranks[None, :]
-    )
-
-    wins = (
-        comparisons < 0
-    ).sum()
-
-    ties = (
-        comparisons == 0
-    ).sum()
-
-    total_pairs = (
-        len(positive_ranks)
-        * len(negative_ranks)
-    )
-
-    return float(
-        (
-            wins
-            + 0.5 * ties
-        )
+        (wins + 0.5 * ties)
         / total_pairs
     )
 
@@ -127,9 +62,8 @@ def reciprocal_rank(
     labels: np.ndarray,
     ranks: np.ndarray,
 ) -> Optional[float]:
-    positive_ranks = ranks[
-        labels == 1
-    ]
+
+    positive_ranks = ranks[labels == 1]
 
     if len(positive_ranks) == 0:
         return None
@@ -138,9 +72,8 @@ def reciprocal_rank(
         positive_ranks.min()
     )
 
-    return (
-        1.0
-        / first_positive_rank
+    return float(
+        1.0 / first_positive_rank
     )
 
 
@@ -149,6 +82,7 @@ def ndcg_at_k(
     ranks: np.ndarray,
     k: int,
 ) -> Optional[float]:
+
     num_positive = int(
         (labels == 1).sum()
     )
@@ -158,19 +92,11 @@ def ndcg_at_k(
 
     dcg = 0.0
 
-    for label, rank in zip(
-        labels,
-        ranks,
-    ):
-        if (
-            label == 1
-            and rank <= k
-        ):
+    for label, rank in zip(labels, ranks):
+        if label == 1 and rank <= k:
             dcg += (
                 1.0
-                / np.log2(
-                    rank + 1
-                )
+                / np.log2(rank + 1)
             )
 
     ideal_count = min(
@@ -179,10 +105,7 @@ def ndcg_at_k(
     )
 
     idcg = sum(
-        1.0
-        / np.log2(
-            rank + 1
-        )
+        1.0 / np.log2(rank + 1)
         for rank in range(
             1,
             ideal_count + 1,
@@ -192,84 +115,58 @@ def ndcg_at_k(
     if idcg == 0:
         return None
 
-    return float(
-        dcg / idcg
-    )
+    return float(dcg / idcg)
 
 
 def top1_accuracy(
     labels: np.ndarray,
-    ranks: np.ndarray,
+    scores: np.ndarray,
 ) -> Optional[float]:
-    if (
-        labels == 1
-    ).sum() == 0:
+
+    if (labels == 1).sum() == 0:
         return None
 
-    top1_labels = labels[
-        ranks == 1
-    ]
-
-    if len(top1_labels) == 0:
-        return None
+    top_index = int(
+        np.argmax(scores)
+    )
 
     return float(
-        np.any(
-            top1_labels == 1
-        )
+        labels[top_index] == 1
     )
 
 
-def has_collision(
-    group: pd.DataFrame,
-) -> bool:
-    positive = group[
-        group["label"] == 1
-    ]
+def make_ranks(
+    scores: np.ndarray,
+) -> np.ndarray:
 
-    negative = group[
-        group["label"] == 0
-    ]
-
-    if (
-        len(positive) == 0
-        or len(negative) == 0
-    ):
-        return False
-
-    positive_sids = set(
-        zip(
-            positive["c1"],
-            positive["c2"],
-            positive["c3"],
-        )
+    sorted_indices = np.argsort(
+        -scores,
+        kind="stable",
     )
 
-    negative_sids = set(
-        zip(
-            negative["c1"],
-            negative["c2"],
-            negative["c3"],
-        )
+    ranks = np.empty(
+        len(scores),
+        dtype=np.int64,
     )
 
-    return bool(
-        positive_sids
-        & negative_sids
+    ranks[sorted_indices] = np.arange(
+        1,
+        len(scores) + 1,
     )
+
+    return ranks
 
 
 def evaluate_ranking(
     df: pd.DataFrame,
     group_column: str,
 ) -> Dict[str, float]:
-    auc_values = []
-    semantic_auc_values = []
 
+    top1_values = []
+    auc_values = []
     mrr_values = []
     ndcg5_values = []
     ndcg10_values = []
-    top1_values = []
 
     num_impressions = 0
 
@@ -277,37 +174,44 @@ def evaluate_ranking(
         group_column,
         sort=False,
     ):
-        labels = (
-            group["label"]
-            .to_numpy(
-                dtype=np.int64
-            )
+
+        labels = group["label"].to_numpy(
+            dtype=np.int64
         )
 
-        ranks = (
-            group["rank"]
-            .to_numpy(
-                dtype=np.int64
-            )
+        scores = group[
+            "candidate_score"
+        ].to_numpy(
+            dtype=np.float64
         )
 
-        candidate_scores = (
-            group["candidate_score"]
-            .to_numpy(
-                dtype=np.float64
+        if len(labels) != 5:
+            raise ValueError(
+                "Each sample must contain exactly "
+                f"5 candidates, but found {len(labels)}."
             )
+
+        num_positive = int(
+            (labels == 1).sum()
         )
 
-        num_impressions += 1
+        if num_positive != 1:
+            raise ValueError(
+                "Each sample must contain exactly "
+                f"1 positive candidate, but found "
+                f"{num_positive}."
+            )
 
-        auc = auc_from_ranks(
+        ranks = make_ranks(scores)
+
+        top1 = top1_accuracy(
             labels,
-            ranks,
+            scores,
         )
 
-        semantic_auc = auc_from_scores(
+        auc = auc_from_scores(
             labels,
-            candidate_scores,
+            scores,
         )
 
         mrr = reciprocal_rank(
@@ -318,241 +222,70 @@ def evaluate_ranking(
         ndcg5 = ndcg_at_k(
             labels,
             ranks,
-            5,
+            k=5,
         )
 
         ndcg10 = ndcg_at_k(
             labels,
             ranks,
-            10,
+            k=10,
         )
 
-        top1 = top1_accuracy(
-            labels,
-            ranks,
-        )
-
-        if auc is not None:
-            auc_values.append(
-                auc
-            )
-
-        if semantic_auc is not None:
-            semantic_auc_values.append(
-                semantic_auc
-            )
-
-        if mrr is not None:
-            mrr_values.append(
-                mrr
-            )
-
-        if ndcg5 is not None:
-            ndcg5_values.append(
-                ndcg5
-            )
-
-        if ndcg10 is not None:
-            ndcg10_values.append(
-                ndcg10
-            )
+        num_impressions += 1
 
         if top1 is not None:
-            top1_values.append(
-                top1
-            )
+            top1_values.append(top1)
+
+        if auc is not None:
+            auc_values.append(auc)
+
+        if mrr is not None:
+            mrr_values.append(mrr)
+
+        if ndcg5 is not None:
+            ndcg5_values.append(ndcg5)
+
+        if ndcg10 is not None:
+            ndcg10_values.append(ndcg10)
 
     return {
-        "num_impressions":
-            num_impressions,
+        "num_impressions": num_impressions,
 
-        "top1_accuracy":
-            float(
-                np.mean(
-                    top1_values
-                )
-            )
+        "top1_accuracy": (
+            float(np.mean(top1_values))
             if top1_values
-            else float("nan"),
+            else float("nan")
+        ),
 
-        "auc":
-            float(
-                np.mean(
-                    auc_values
-                )
-            )
+        "auc": (
+            float(np.mean(auc_values))
             if auc_values
-            else float("nan"),
+            else float("nan")
+        ),
 
-        "semantic_auc_without_tie":
-            float(
-                np.mean(
-                    semantic_auc_values
-                )
-            )
-            if semantic_auc_values
-            else float("nan"),
-
-        "mrr":
-            float(
-                np.mean(
-                    mrr_values
-                )
-            )
+        "mrr": (
+            float(np.mean(mrr_values))
             if mrr_values
-            else float("nan"),
+            else float("nan")
+        ),
 
-        "ndcg@5":
-            float(
-                np.mean(
-                    ndcg5_values
-                )
-            )
+        "ndcg@5": (
+            float(np.mean(ndcg5_values))
             if ndcg5_values
-            else float("nan"),
+            else float("nan")
+        ),
 
-        "ndcg@10":
-            float(
-                np.mean(
-                    ndcg10_values
-                )
-            )
+        "ndcg@10": (
+            float(np.mean(ndcg10_values))
             if ndcg10_values
-            else float("nan"),
-    }
-
-
-def evaluate_tie_pairs(
-    df: pd.DataFrame,
-    group_column: str,
-) -> Dict[str, float]:
-    total_pairs = 0
-
-    correct_sum = 0.0
-
-    positive_score_sum = 0.0
-    negative_score_sum = 0.0
-
-    margin_sum = 0.0
-
-    for _, impression in df.groupby(
-        group_column,
-        sort=False,
-    ):
-        for _, sid_group in impression.groupby(
-            [
-                "c1",
-                "c2",
-                "c3",
-            ],
-            sort=False,
-        ):
-            positives = sid_group[
-                sid_group["label"] == 1
-            ]
-
-            negatives = sid_group[
-                sid_group["label"] == 0
-            ]
-
-            if (
-                len(positives) == 0
-                or len(negatives) == 0
-            ):
-                continue
-
-            positive_scores = (
-                positives[
-                    "tie_score"
-                ]
-                .to_numpy(
-                    dtype=np.float64
-                )
-            )
-
-            negative_scores = (
-                negatives[
-                    "tie_score"
-                ]
-                .to_numpy(
-                    dtype=np.float64
-                )
-            )
-
-            for positive_score in positive_scores:
-
-                for negative_score in negative_scores:
-
-                    total_pairs += 1
-
-                    positive_score_sum += (
-                        positive_score
-                    )
-
-                    negative_score_sum += (
-                        negative_score
-                    )
-
-                    margin_sum += (
-                        positive_score
-                        - negative_score
-                    )
-
-                    if (
-                        positive_score
-                        > negative_score
-                    ):
-                        correct_sum += 1.0
-
-                    elif (
-                        positive_score
-                        == negative_score
-                    ):
-                        correct_sum += 0.5
-
-    if total_pairs == 0:
-        return {
-            "num_tie_pairs":
-                0,
-
-            "tie_pair_accuracy":
-                float("nan"),
-
-            "mean_positive_tie_score":
-                float("nan"),
-
-            "mean_negative_tie_score":
-                float("nan"),
-
-            "mean_tie_margin":
-                float("nan"),
-        }
-
-    return {
-        "num_tie_pairs":
-            total_pairs,
-
-        "tie_pair_accuracy":
-            correct_sum
-            / total_pairs,
-
-        "mean_positive_tie_score":
-            positive_score_sum
-            / total_pairs,
-
-        "mean_negative_tie_score":
-            negative_score_sum
-            / total_pairs,
-
-        "mean_tie_margin":
-            margin_sum
-            / total_pairs,
+            else float("nan")
+        ),
     }
 
 
 def evaluate(
     prediction_path: Path,
-) -> Dict:
+) -> Dict[str, float]:
 
     if not prediction_path.exists():
         raise FileNotFoundError(
@@ -567,11 +300,6 @@ def evaluate(
     required_columns = [
         "label",
         "candidate_score",
-        "tie_score",
-        "rank",
-        "c1",
-        "c2",
-        "c3",
     ]
 
     missing_columns = [
@@ -587,14 +315,10 @@ def evaluate(
         )
 
     if "sample_index" in df.columns:
-        group_column = (
-            "sample_index"
-        )
+        group_column = "sample_index"
 
     elif "impression_id" in df.columns:
-        group_column = (
-            "impression_id"
-        )
+        group_column = "impression_id"
 
     else:
         raise ValueError(
@@ -607,300 +331,46 @@ def evaluate(
         .astype(int)
     )
 
-    collision_map = {}
-
-    for key, group in df.groupby(
-        group_column,
-        sort=False,
-    ):
-        collision_map[
-            key
-        ] = has_collision(
-            group
-        )
-
-    collision_keys = [
-        key
-        for key, value
-        in collision_map.items()
-        if value
-    ]
-
-    collision_mask = (
-        df[
-            group_column
-        ]
-        .isin(
-            collision_keys
-        )
+    return evaluate_ranking(
+        df=df,
+        group_column=group_column,
     )
-
-    collision_df = df[
-        collision_mask
-    ].copy()
-
-    overall_metrics = (
-        evaluate_ranking(
-            df=
-                df,
-
-            group_column=
-                group_column,
-        )
-    )
-
-    if len(collision_df) > 0:
-
-        collision_metrics = (
-            evaluate_ranking(
-                df=
-                    collision_df,
-
-                group_column=
-                    group_column,
-            )
-        )
-
-    else:
-
-        collision_metrics = {
-            "num_impressions":
-                0,
-
-            "top1_accuracy":
-                float("nan"),
-
-            "auc":
-                float("nan"),
-
-            "semantic_auc_without_tie":
-                float("nan"),
-
-            "mrr":
-                float("nan"),
-
-            "ndcg@5":
-                float("nan"),
-
-            "ndcg@10":
-                float("nan"),
-        }
-
-    tie_metrics = (
-        evaluate_tie_pairs(
-            df=
-                df,
-
-            group_column=
-                group_column,
-        )
-    )
-
-    num_impressions = (
-        overall_metrics[
-            "num_impressions"
-        ]
-    )
-
-    num_collision_impressions = (
-        collision_metrics[
-            "num_impressions"
-        ]
-    )
-
-    collision_rate = (
-        num_collision_impressions
-        / num_impressions
-        if num_impressions > 0
-        else 0.0
-    )
-
-    return {
-        "overall":
-            overall_metrics,
-
-        "collision_subset":
-            collision_metrics,
-
-        "tie_breaking":
-            tie_metrics,
-
-        "collision_rate":
-            collision_rate,
-
-        "num_collision_impressions":
-            num_collision_impressions,
-    }
 
 
 def print_metrics(
-    metrics: Dict,
+    metrics: Dict[str, float],
 ) -> None:
 
-    overall = metrics[
-        "overall"
-    ]
-
-    collision = metrics[
-        "collision_subset"
-    ]
-
-    tie = metrics[
-        "tie_breaking"
-    ]
-
     print()
+    print("Test Ranking Performance")
     print(
-        "========================================"
+        f"Impressions    : "
+        f"{metrics['num_impressions']:,}"
     )
 
     print(
-        "Overall Ranking Performance"
+        f"Top-1 Accuracy : "
+        f"{metrics['top1_accuracy']:.6f}"
     )
 
     print(
-        "========================================"
+        f"AUC            : "
+        f"{metrics['auc']:.6f}"
     )
 
     print(
-        f"Impressions : "
-        f"{overall['num_impressions']:,}"
+        f"MRR            : "
+        f"{metrics['mrr']:.6f}"
     )
 
     print(
-        f"Top-1       : "
-        f"{overall['top1_accuracy']:.6f}"
+        f"nDCG@5         : "
+        f"{metrics['ndcg@5']:.6f}"
     )
 
     print(
-        f"AUC         : "
-        f"{overall['auc']:.6f}"
-    )
-
-    print(
-        f"MRR         : "
-        f"{overall['mrr']:.6f}"
-    )
-
-    print(
-        f"nDCG@5      : "
-        f"{overall['ndcg@5']:.6f}"
-    )
-
-    print(
-        f"nDCG@10     : "
-        f"{overall['ndcg@10']:.6f}"
-    )
-
-    print(
-        f"Semantic AUC without tie : "
-        f"{overall['semantic_auc_without_tie']:.6f}"
-    )
-
-    print()
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "Collision Analysis"
-    )
-
-    print(
-        "========================================"
-    )
-
-    print(
-        f"Collision impressions : "
-        f"{metrics['num_collision_impressions']:,}"
-    )
-
-    print(
-        f"Collision rate        : "
-        f"{metrics['collision_rate']:.6f}"
-    )
-
-    if (
-        collision[
-            "num_impressions"
-        ]
-        > 0
-    ):
-
-        print(
-            f"Collision Top-1       : "
-            f"{collision['top1_accuracy']:.6f}"
-        )
-
-        print(
-            f"Collision AUC         : "
-            f"{collision['auc']:.6f}"
-        )
-
-        print(
-            f"Collision MRR         : "
-            f"{collision['mrr']:.6f}"
-        )
-
-        print(
-            f"Collision nDCG@5      : "
-            f"{collision['ndcg@5']:.6f}"
-        )
-
-        print(
-            f"Collision nDCG@10     : "
-            f"{collision['ndcg@10']:.6f}"
-        )
-
-        print(
-            f"Collision Semantic AUC without tie : "
-            f"{collision['semantic_auc_without_tie']:.6f}"
-        )
-
-    else:
-
-        print(
-            "No collision impressions."
-        )
-
-    print()
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "Tie-Breaking Performance"
-    )
-
-    print(
-        "========================================"
-    )
-
-    print(
-        f"Tie pairs             : "
-        f"{tie['num_tie_pairs']:,}"
-    )
-
-    print(
-        f"Tie pair accuracy     : "
-        f"{tie['tie_pair_accuracy']:.6f}"
-    )
-
-    print(
-        f"Positive tie score    : "
-        f"{tie['mean_positive_tie_score']:.6f}"
-    )
-
-    print(
-        f"Negative tie score    : "
-        f"{tie['mean_negative_tie_score']:.6f}"
-    )
-
-    print(
-        f"Mean tie margin       : "
-        f"{tie['mean_tie_margin']:.6f}"
+        f"nDCG@10        : "
+        f"{metrics['ndcg@10']:.6f}"
     )
 
 
@@ -908,8 +378,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate candidate ranking "
-            "for news recommendation."
+            "Evaluate Top-1 Accuracy, AUC, "
+            "MRR, nDCG@5 and nDCG@10."
         )
     )
 
@@ -933,16 +403,12 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    prediction_path = (
-        resolve_path(
-            args.prediction_path
-        )
+    prediction_path = resolve_path(
+        args.prediction_path
     )
 
-    output_path = (
-        resolve_path(
-            args.output_path
-        )
+    output_path = resolve_path(
+        args.output_path
     )
 
     metrics = evaluate(
@@ -950,9 +416,7 @@ def main() -> None:
             prediction_path
     )
 
-    print_metrics(
-        metrics
-    )
+    print_metrics(metrics)
 
     output_path.parent.mkdir(
         parents=True,
@@ -964,7 +428,6 @@ def main() -> None:
         "w",
         encoding="utf-8",
     ) as f:
-
         json.dump(
             metrics,
             f,
@@ -973,7 +436,6 @@ def main() -> None:
         )
 
     print()
-
     print(
         "Metrics saved:",
         output_path,

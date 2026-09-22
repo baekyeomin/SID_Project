@@ -9,7 +9,6 @@ import gin
 import numpy as np
 import torch
 
-from torch import Tensor
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 
@@ -22,10 +21,22 @@ from modules.model import NewsEncoderDecoderTransformer
 from modules.loss import TransformerLoss
 
 
+# ============================================================
+# Base path
+# ============================================================
+
 BASE_DIR = Path(__file__).resolve().parent
 
 
+# ============================================================
+# Random seed
+# ============================================================
+
 def set_seed(seed: int) -> None:
+    """
+    실험 결과 재현을 위해 random seed를 고정한다.
+    """
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -35,7 +46,15 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+# ============================================================
+# Path
+# ============================================================
+
 def resolve_path(path: str) -> Path:
+    """
+    상대경로를 Transformer 프로젝트 기준 절대경로로 변환한다.
+    """
+
     path_obj = Path(path)
 
     if path_obj.is_absolute():
@@ -44,172 +63,93 @@ def resolve_path(path: str) -> Path:
     return BASE_DIR / path_obj
 
 
+# ============================================================
+# Device
+# ============================================================
+
 def get_device() -> torch.device:
+    """
+    CUDA 사용 가능 시 GPU, 아니면 CPU를 사용한다.
+    """
+
     if torch.cuda.is_available():
         return torch.device("cuda")
 
     return torch.device("cpu")
 
 
-def create_metric_dict() -> Dict[str, float]:
-    return {
-        "preference_loss_sum": 0.0,
-        "tie_loss_sum": 0.0,
+# ============================================================
+# Metric container
+# ============================================================
 
+def create_metric_dict() -> Dict[str, float]:
+    """
+    한 epoch 동안 누적할 학습/평가 통계를 생성한다.
+    """
+
+    return {
+        # Loss
+        "preference_loss_sum": 0.0,
+
+        # Raw candidate score
         "positive_score_sum": 0.0,
         "negative_score_sum": 0.0,
 
+        # 5 candidates 안에서 softmax한 상대확률
         "positive_prob_sum": 0.0,
         "negative_prob_sum": 0.0,
 
-        "tie_positive_score_sum": 0.0,
-        "tie_negative_score_sum": 0.0,
+        # Top-1 accuracy
+        "top1_correct": 0,
 
-        "num_valid_candidates": 0,
+        # Count
+        "num_impressions": 0,
         "num_positive_candidates": 0,
         "num_negative_candidates": 0,
-
-        "num_tie_pairs": 0,
-        "num_collision_impressions": 0,
-        "num_impressions": 0,
     }
 
 
-@torch.no_grad()
-def get_tie_statistics(
-    candidate_sids: Tensor,
-    candidate_labels: Tensor,
-    candidate_mask: Tensor,
-    tie_scores: Tensor,
-) -> Dict[str, float]:
-
-    num_tie_pairs = 0
-    num_collision_impressions = 0
-
-    positive_score_sum = 0.0
-    negative_score_sum = 0.0
-
-    batch_size = candidate_sids.shape[0]
-
-    for batch_idx in range(batch_size):
-
-        valid = candidate_mask[batch_idx].bool()
-
-        sids = candidate_sids[
-            batch_idx
-        ][valid]
-
-        labels = candidate_labels[
-            batch_idx
-        ][valid]
-
-        scores = tie_scores[
-            batch_idx
-        ][valid]
-
-        positive_indices = torch.where(
-            labels == 1
-        )[0]
-
-        negative_indices = torch.where(
-            labels == 0
-        )[0]
-
-        if (
-            positive_indices.numel() == 0
-            or negative_indices.numel() == 0
-        ):
-            continue
-
-        negative_sids = sids[
-            negative_indices
-        ]
-
-        negative_scores = scores[
-            negative_indices
-        ]
-
-        collision_found = False
-
-        for positive_idx in positive_indices:
-
-            positive_sid = sids[
-                positive_idx
-            ]
-
-            positive_score = scores[
-                positive_idx
-            ]
-
-            collision_mask = (
-                negative_sids
-                == positive_sid.unsqueeze(0)
-            ).all(dim=-1)
-
-            pair_count = int(
-                collision_mask.sum().item()
-            )
-
-            if pair_count == 0:
-                continue
-
-            collision_found = True
-            num_tie_pairs += pair_count
-
-            positive_score_sum += float(
-                positive_score.item()
-                * pair_count
-            )
-
-            negative_score_sum += float(
-                negative_scores[
-                    collision_mask
-                ].sum().item()
-            )
-
-        if collision_found:
-            num_collision_impressions += 1
-
-    return {
-        "num_tie_pairs":
-            num_tie_pairs,
-
-        "num_collision_impressions":
-            num_collision_impressions,
-
-        "tie_positive_score_sum":
-            positive_score_sum,
-
-        "tie_negative_score_sum":
-            negative_score_sum,
-    }
-
+# ============================================================
+# Metric update
+# ============================================================
 
 @torch.no_grad()
 def update_metrics(
     metrics: Dict[str, float],
     loss_output,
     model_output,
-    candidate_sids: Tensor,
-    candidate_labels: Tensor,
-    candidate_mask: Tensor,
+    candidate_labels: torch.Tensor,
 ) -> None:
+    """
+    한 batch의 loss, score, probability, Top-1 결과를 누적한다.
+    """
 
     candidate_labels = candidate_labels.float()
-    candidate_mask = candidate_mask.bool()
+
+    # --------------------------------------------------------
+    # candidate_scores
+    #
+    # shape = [B, 5]
+    #
+    # log probability 합이므로 음수여도 정상
+    # --------------------------------------------------------
+
+    candidate_scores = (
+        model_output.candidate_scores
+    )
+
+    batch_size = candidate_scores.shape[0]
+
+    # --------------------------------------------------------
+    # Positive / negative mask
+    # --------------------------------------------------------
 
     positive_mask = (
-        candidate_mask
-        & (candidate_labels == 1)
+        candidate_labels == 1
     )
 
     negative_mask = (
-        candidate_mask
-        & (candidate_labels == 0)
-    )
-
-    num_valid = int(
-        candidate_mask.sum().item()
+        candidate_labels == 0
     )
 
     num_positive = int(
@@ -220,113 +160,106 @@ def update_metrics(
         negative_mask.sum().item()
     )
 
+    # --------------------------------------------------------
+    # Loss
+    #
+    # cross_entropy는 batch 평균이므로
+    # batch_size를 곱해서 epoch 전체 합으로 누적
+    # --------------------------------------------------------
+
     metrics[
         "preference_loss_sum"
     ] += (
         loss_output.preference_loss.item()
-        * num_valid
+        * batch_size
     )
 
-    candidate_scores = (
-        model_output.candidate_scores
-    )
-
-    candidate_probs = torch.exp(
-        candidate_scores
-    )
-
-    if num_positive > 0:
-
-        metrics[
-            "positive_score_sum"
-        ] += float(
-            candidate_scores[
-                positive_mask
-            ].sum().item()
-        )
-
-        metrics[
-            "positive_prob_sum"
-        ] += float(
-            candidate_probs[
-                positive_mask
-            ].sum().item()
-        )
-
-    if num_negative > 0:
-
-        metrics[
-            "negative_score_sum"
-        ] += float(
-            candidate_scores[
-                negative_mask
-            ].sum().item()
-        )
-
-        metrics[
-            "negative_prob_sum"
-        ] += float(
-            candidate_probs[
-                negative_mask
-            ].sum().item()
-        )
-
-    tie_stats = get_tie_statistics(
-        candidate_sids=
-            candidate_sids,
-
-        candidate_labels=
-            candidate_labels,
-
-        candidate_mask=
-            candidate_mask,
-
-        tie_scores=
-            model_output.tie_scores,
-    )
-
-    num_tie_pairs = int(
-        tie_stats[
-            "num_tie_pairs"
-        ]
-    )
-
-    if num_tie_pairs > 0:
-
-        metrics[
-            "tie_loss_sum"
-        ] += (
-            loss_output.tie_loss.item()
-            * num_tie_pairs
-        )
+    # --------------------------------------------------------
+    # Raw score 통계
+    # --------------------------------------------------------
 
     metrics[
-        "tie_positive_score_sum"
-    ] += tie_stats[
-        "tie_positive_score_sum"
-    ]
+        "positive_score_sum"
+    ] += float(
+        candidate_scores[
+            positive_mask
+        ].sum().item()
+    )
 
     metrics[
-        "tie_negative_score_sum"
-    ] += tie_stats[
-        "tie_negative_score_sum"
-    ]
+        "negative_score_sum"
+    ] += float(
+        candidate_scores[
+            negative_mask
+        ].sum().item()
+    )
+
+    # --------------------------------------------------------
+    # Candidate probability
+    #
+    # 5개 후보 score에 softmax 적용
+    #
+    # 각 row에서 합 = 1
+    # --------------------------------------------------------
+
+    candidate_probs = torch.softmax(
+        candidate_scores,
+        dim=1,
+    )
 
     metrics[
-        "num_tie_pairs"
-    ] += num_tie_pairs
+        "positive_prob_sum"
+    ] += float(
+        candidate_probs[
+            positive_mask
+        ].sum().item()
+    )
 
     metrics[
-        "num_collision_impressions"
+        "negative_prob_sum"
+    ] += float(
+        candidate_probs[
+            negative_mask
+        ].sum().item()
+    )
+
+    # --------------------------------------------------------
+    # Top-1 Accuracy
+    #
+    # 가장 높은 score의 candidate와
+    # 실제 positive candidate 위치 비교
+    # --------------------------------------------------------
+
+    predicted_indices = (
+        candidate_scores.argmax(
+            dim=1
+        )
+    )
+
+    target_indices = (
+        candidate_labels.argmax(
+            dim=1
+        )
+    )
+
+    top1_correct = (
+        predicted_indices
+        == target_indices
+    ).sum()
+
+    metrics[
+        "top1_correct"
     ] += int(
-        tie_stats[
-            "num_collision_impressions"
-        ]
+        top1_correct.item()
     )
 
+    # --------------------------------------------------------
+    # Count
+    # --------------------------------------------------------
+
     metrics[
-        "num_valid_candidates"
-    ] += num_valid
+        "num_impressions"
+    ] += batch_size
 
     metrics[
         "num_positive_candidates"
@@ -336,19 +269,22 @@ def update_metrics(
         "num_negative_candidates"
     ] += num_negative
 
-    metrics[
-        "num_impressions"
-    ] += candidate_sids.shape[0]
 
+# ============================================================
+# Finalize metrics
+# ============================================================
 
 def finalize_metrics(
     metrics: Dict[str, float],
     loss_fn: TransformerLoss,
 ) -> Dict[str, float]:
+    """
+    epoch 동안 누적된 값을 평균 metric으로 변환한다.
+    """
 
-    num_valid = int(
+    num_impressions = int(
         metrics[
-            "num_valid_candidates"
+            "num_impressions"
         ]
     )
 
@@ -364,38 +300,34 @@ def finalize_metrics(
         ]
     )
 
-    num_tie_pairs = int(
-        metrics[
-            "num_tie_pairs"
-        ]
-    )
-
-    num_impressions = int(
-        metrics[
-            "num_impressions"
-        ]
-    )
-
-    if num_valid == 0:
+    if num_impressions == 0:
         raise ValueError(
-            "No valid candidates were processed."
+            "No impressions were processed."
         )
+
+    # --------------------------------------------------------
+    # Preference loss
+    # --------------------------------------------------------
 
     preference_loss = (
         metrics[
             "preference_loss_sum"
         ]
-        / num_valid
+        / num_impressions
     )
 
-    tie_loss = (
-        metrics[
-            "tie_loss_sum"
-        ]
-        / num_tie_pairs
-        if num_tie_pairs > 0
-        else 0.0
+    # --------------------------------------------------------
+    # Total loss
+    # --------------------------------------------------------
+
+    total_loss = (
+        loss_fn.lambda_preference
+        * preference_loss
     )
+
+    # --------------------------------------------------------
+    # Average raw score
+    # --------------------------------------------------------
 
     positive_score = (
         metrics[
@@ -415,6 +347,10 @@ def finalize_metrics(
         else float("nan")
     )
 
+    # --------------------------------------------------------
+    # Average candidate probability
+    # --------------------------------------------------------
+
     positive_prob = (
         metrics[
             "positive_prob_sum"
@@ -433,40 +369,20 @@ def finalize_metrics(
         else float("nan")
     )
 
-    tie_positive_score = (
-        metrics[
-            "tie_positive_score_sum"
-        ]
-        / num_tie_pairs
-        if num_tie_pairs > 0
-        else float("nan")
-    )
+    # --------------------------------------------------------
+    # Top-1 Accuracy
+    # --------------------------------------------------------
 
-    tie_negative_score = (
+    top1_accuracy = (
         metrics[
-            "tie_negative_score_sum"
-        ]
-        / num_tie_pairs
-        if num_tie_pairs > 0
-        else float("nan")
-    )
-
-    collision_rate = (
-        metrics[
-            "num_collision_impressions"
+            "top1_correct"
         ]
         / num_impressions
-        if num_impressions > 0
-        else 0.0
     )
 
-    total_loss = (
-        loss_fn.lambda_preference
-        * preference_loss
-
-        + loss_fn.lambda_tie
-        * tie_loss
-    )
+    # --------------------------------------------------------
+    # Return
+    # --------------------------------------------------------
 
     return {
         "total_loss":
@@ -474,9 +390,6 @@ def finalize_metrics(
 
         "preference_loss":
             preference_loss,
-
-        "tie_loss":
-            tie_loss,
 
         "positive_score":
             positive_score,
@@ -490,35 +403,30 @@ def finalize_metrics(
         "negative_prob":
             negative_prob,
 
-        "tie_positive_score":
-            tie_positive_score,
+        "top1_accuracy":
+            top1_accuracy,
 
-        "tie_negative_score":
-            tie_negative_score,
+        "top1_correct":
+            int(
+                metrics[
+                    "top1_correct"
+                ]
+            ),
 
-        "num_valid_candidates":
-            num_valid,
+        "num_impressions":
+            num_impressions,
 
         "num_positive_candidates":
             num_positive,
 
         "num_negative_candidates":
             num_negative,
-
-        "num_tie_pairs":
-            num_tie_pairs,
-
-        "num_collision_impressions":
-            int(
-                metrics[
-                    "num_collision_impressions"
-                ]
-            ),
-
-        "collision_rate":
-            collision_rate,
     }
 
+
+# ============================================================
+# Train one epoch
+# ============================================================
 
 def train_one_epoch(
     model: NewsEncoderDecoderTransformer,
@@ -528,6 +436,9 @@ def train_one_epoch(
     device: torch.device,
     gradient_clip_norm: Optional[float] = 1.0,
 ) -> Dict[str, float]:
+    """
+    training dataset 전체를 한 번 학습한다.
+    """
 
     model.train()
 
@@ -535,51 +446,57 @@ def train_one_epoch(
 
     for batch in dataloader:
 
-        history_sids = batch[
-            "history_sids"
-        ].to(
-            device,
-            non_blocking=True,
+        # ----------------------------------------------------
+        # Batch → GPU
+        # ----------------------------------------------------
+
+        history_sids = (
+            batch["history_sids"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        history_mask = batch[
-            "history_mask"
-        ].to(
-            device,
-            non_blocking=True,
+        history_mask = (
+            batch["history_mask"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        candidate_sids = batch[
-            "candidate_sids"
-        ].to(
-            device,
-            non_blocking=True,
+        candidate_sids = (
+            batch["candidate_sids"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        candidate_c4 = batch[
-            "candidate_c4"
-        ].to(
-            device,
-            non_blocking=True,
+        candidate_labels = (
+            batch["candidate_labels"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        candidate_labels = batch[
-            "candidate_labels"
-        ].to(
-            device,
-            non_blocking=True,
-        )
-
-        candidate_mask = batch[
-            "candidate_mask"
-        ].to(
-            device,
-            non_blocking=True,
-        )
+        # ----------------------------------------------------
+        # Gradient 초기화
+        # ----------------------------------------------------
 
         optimizer.zero_grad(
             set_to_none=True
         )
+
+        # ----------------------------------------------------
+        # Forward
+        #
+        # history + candidate SID
+        #       ↓
+        # candidate_scores [B,5]
+        # ----------------------------------------------------
 
         model_output = model(
             history_sids=
@@ -590,29 +507,33 @@ def train_one_epoch(
 
             candidate_sids=
                 candidate_sids,
-
-            candidate_c4=
-                candidate_c4,
         )
+
+        # ----------------------------------------------------
+        # Loss
+        #
+        # candidate_scores + labels
+        #       ↓
+        # preference loss
+        # ----------------------------------------------------
 
         loss_output = loss_fn(
             candidate_scores=
                 model_output.candidate_scores,
 
-            tie_scores=
-                model_output.tie_scores,
-
-            candidate_sids=
-                candidate_sids,
-
             candidate_labels=
                 candidate_labels,
-
-            candidate_mask=
-                candidate_mask,
         )
 
+        # ----------------------------------------------------
+        # Backpropagation
+        # ----------------------------------------------------
+
         loss_output.total_loss.backward()
+
+        # ----------------------------------------------------
+        # Gradient clipping
+        # ----------------------------------------------------
 
         if gradient_clip_norm is not None:
 
@@ -622,7 +543,15 @@ def train_one_epoch(
                     gradient_clip_norm,
             )
 
+        # ----------------------------------------------------
+        # Parameter update
+        # ----------------------------------------------------
+
         optimizer.step()
+
+        # ----------------------------------------------------
+        # Metric update
+        # ----------------------------------------------------
 
         update_metrics(
             metrics=
@@ -634,14 +563,8 @@ def train_one_epoch(
             model_output=
                 model_output,
 
-            candidate_sids=
-                candidate_sids,
-
             candidate_labels=
                 candidate_labels,
-
-            candidate_mask=
-                candidate_mask,
         )
 
     return finalize_metrics(
@@ -653,6 +576,10 @@ def train_one_epoch(
     )
 
 
+# ============================================================
+# Validation
+# ============================================================
+
 @torch.no_grad()
 def evaluate(
     model: NewsEncoderDecoderTransformer,
@@ -660,6 +587,9 @@ def evaluate(
     dataloader: DataLoader,
     device: torch.device,
 ) -> Dict[str, float]:
+    """
+    validation dataset에서 loss와 Top-1 성능을 계산한다.
+    """
 
     model.eval()
 
@@ -667,47 +597,45 @@ def evaluate(
 
     for batch in dataloader:
 
-        history_sids = batch[
-            "history_sids"
-        ].to(
-            device,
-            non_blocking=True,
+        # ----------------------------------------------------
+        # Batch → GPU
+        # ----------------------------------------------------
+
+        history_sids = (
+            batch["history_sids"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        history_mask = batch[
-            "history_mask"
-        ].to(
-            device,
-            non_blocking=True,
+        history_mask = (
+            batch["history_mask"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        candidate_sids = batch[
-            "candidate_sids"
-        ].to(
-            device,
-            non_blocking=True,
+        candidate_sids = (
+            batch["candidate_sids"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        candidate_c4 = batch[
-            "candidate_c4"
-        ].to(
-            device,
-            non_blocking=True,
+        candidate_labels = (
+            batch["candidate_labels"]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
 
-        candidate_labels = batch[
-            "candidate_labels"
-        ].to(
-            device,
-            non_blocking=True,
-        )
-
-        candidate_mask = batch[
-            "candidate_mask"
-        ].to(
-            device,
-            non_blocking=True,
-        )
+        # ----------------------------------------------------
+        # Forward
+        # ----------------------------------------------------
 
         model_output = model(
             history_sids=
@@ -718,27 +646,23 @@ def evaluate(
 
             candidate_sids=
                 candidate_sids,
-
-            candidate_c4=
-                candidate_c4,
         )
+
+        # ----------------------------------------------------
+        # Loss
+        # ----------------------------------------------------
 
         loss_output = loss_fn(
             candidate_scores=
                 model_output.candidate_scores,
 
-            tie_scores=
-                model_output.tie_scores,
-
-            candidate_sids=
-                candidate_sids,
-
             candidate_labels=
                 candidate_labels,
-
-            candidate_mask=
-                candidate_mask,
         )
+
+        # ----------------------------------------------------
+        # Metric
+        # ----------------------------------------------------
 
         update_metrics(
             metrics=
@@ -750,14 +674,8 @@ def evaluate(
             model_output=
                 model_output,
 
-            candidate_sids=
-                candidate_sids,
-
             candidate_labels=
                 candidate_labels,
-
-            candidate_mask=
-                candidate_mask,
         )
 
     return finalize_metrics(
@@ -769,16 +687,31 @@ def evaluate(
     )
 
 
+# ============================================================
+# Metric print
+# ============================================================
+
 def print_metrics(
     split_name: str,
     metrics: Dict[str, float],
 ) -> None:
+    """
+    train/validation의 주요 metric을 보기 좋게 출력한다.
+    """
 
     print(
         f"{split_name} "
         f"Loss={metrics['total_loss']:.6f} | "
-        f"Preference={metrics['preference_loss']:.6f} | "
-        f"Tie={metrics['tie_loss']:.6f}"
+        f"Preference={metrics['preference_loss']:.6f}"
+    )
+
+    print(
+        f"{split_name} "
+        f"Top-1 Accuracy="
+        f"{metrics['top1_accuracy']:.4%} | "
+        f"Correct="
+        f"{int(metrics['top1_correct']):,}/"
+        f"{int(metrics['num_impressions']):,}"
     )
 
     print(
@@ -797,31 +730,17 @@ def print_metrics(
 
     print(
         f"{split_name} "
-        f"Tie score | "
-        f"Positive={metrics['tie_positive_score']:.4f} | "
-        f"Negative={metrics['tie_negative_score']:.4f}"
-    )
-
-    print(
-        f"{split_name} "
-        f"Collision | "
-        f"Pairs={int(metrics['num_tie_pairs']):,} | "
-        f"Impressions="
-        f"{int(metrics['num_collision_impressions']):,} | "
-        f"Rate={metrics['collision_rate']:.4%}"
-    )
-
-    print(
-        f"{split_name} "
         f"Candidates | "
         f"Positive="
         f"{int(metrics['num_positive_candidates']):,} | "
         f"Negative="
-        f"{int(metrics['num_negative_candidates']):,} | "
-        f"Total="
-        f"{int(metrics['num_valid_candidates']):,}"
+        f"{int(metrics['num_negative_candidates']):,}"
     )
 
+
+# ============================================================
+# Checkpoint save
+# ============================================================
 
 def save_checkpoint(
     path: Path,
@@ -829,7 +748,11 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     validation_loss: float,
+    validation_top1_accuracy: float,
 ) -> None:
+    """
+    model/optimizer 상태와 gin 설정을 checkpoint로 저장한다.
+    """
 
     path.parent.mkdir(
         parents=True,
@@ -849,6 +772,9 @@ def save_checkpoint(
         "validation_loss":
             validation_loss,
 
+        "validation_top1_accuracy":
+            validation_top1_accuracy,
+
         "gin_config":
             gin.config_str(),
     }
@@ -858,6 +784,10 @@ def save_checkpoint(
         path,
     )
 
+
+# ============================================================
+# Main training function
+# ============================================================
 
 @gin.configurable
 def train(
@@ -882,6 +812,13 @@ def train(
         int
     ] = None,
 ) -> None:
+    """
+    train/validation dataset을 이용해 Transformer 전체 학습을 수행한다.
+    """
+
+    # ========================================================
+    # Seed / Device
+    # ========================================================
 
     set_seed(seed)
 
@@ -896,6 +833,10 @@ def train(
             "GPU:",
             torch.cuda.get_device_name(0),
         )
+
+    # ========================================================
+    # Path
+    # ========================================================
 
     train_path = resolve_path(
         train_path
@@ -924,17 +865,27 @@ def train(
         save_dir,
     )
 
+    # ========================================================
+    # File check
+    # ========================================================
+
     if not train_path.exists():
+
         raise FileNotFoundError(
             f"Train file not found:\n"
             f"{train_path}"
         )
 
     if not validation_path.exists():
+
         raise FileNotFoundError(
             f"Validation file not found:\n"
             f"{validation_path}"
         )
+
+    # ========================================================
+    # Dataset
+    # ========================================================
 
     train_dataset = NewsSequenceDataset(
         parquet_path=
@@ -955,6 +906,10 @@ def train(
         "Validation samples :",
         f"{len(validation_dataset):,}",
     )
+
+    # ========================================================
+    # DataLoader
+    # ========================================================
 
     train_loader = DataLoader(
         dataset=
@@ -996,25 +951,41 @@ def train(
         ),
     )
 
+    # ========================================================
+    # Model
+    #
+    # vocab size와 architecture는 gin에서 주입
+    # ========================================================
+
     model = (
         NewsEncoderDecoderTransformer()
         .to(device)
     )
+
+    # ========================================================
+    # Loss
+    #
+    # 현재는 preference loss만 사용
+    # ========================================================
 
     loss_fn = (
         TransformerLoss()
         .to(device)
     )
 
+    # ========================================================
+    # Optimizer
+    # ========================================================
+
     optimizer = AdamW(
         model.parameters(),
-
-        lr=
-            learning_rate,
-
-        weight_decay=
-            weight_decay,
+        lr=learning_rate,
+        weight_decay=weight_decay,
     )
+
+    # ========================================================
+    # Parameter count
+    # ========================================================
 
     total_parameters = sum(
         p.numel()
@@ -1036,6 +1007,10 @@ def train(
         "Trainable parameters :",
         f"{trainable_parameters:,}",
     )
+
+    # ========================================================
+    # Before training validation
+    # ========================================================
 
     print()
     print("Before Training")
@@ -1059,9 +1034,15 @@ def train(
         initial_validation_metrics,
     )
 
+    # ========================================================
+    # Best model tracking
+    # ========================================================
+
     best_validation_loss = float(
         "inf"
     )
+
+    best_validation_top1 = 0.0
 
     epochs_without_improvement = 0
 
@@ -1074,6 +1055,11 @@ def train(
     validation_loss = float(
         "inf"
     )
+    validation_top1 = 0.0
+
+    # ========================================================
+    # Epoch loop
+    # ========================================================
 
     for epoch in range(
         1,
@@ -1084,6 +1070,10 @@ def train(
         print(
             f"Epoch {epoch}/{num_epochs}"
         )
+
+        # ----------------------------------------------------
+        # Train
+        # ----------------------------------------------------
 
         train_metrics = train_one_epoch(
             model=
@@ -1110,6 +1100,10 @@ def train(
             train_metrics,
         )
 
+        # ----------------------------------------------------
+        # Validation
+        # ----------------------------------------------------
+
         validation_metrics = evaluate(
             model=
                 model,
@@ -1135,6 +1129,16 @@ def train(
             ]
         )
 
+        validation_top1 = (
+            validation_metrics[
+                "top1_accuracy"
+            ]
+        )
+
+        # ----------------------------------------------------
+        # Every epoch checkpoint
+        # ----------------------------------------------------
+
         save_checkpoint(
             path=
                 save_dir
@@ -1151,12 +1155,28 @@ def train(
 
             validation_loss=
                 validation_loss,
+
+            validation_top1_accuracy=
+                validation_top1,
         )
 
-        if validation_loss < best_validation_loss:
+        # ----------------------------------------------------
+        # Best checkpoint
+        #
+        # validation loss 기준
+        # ----------------------------------------------------
+
+        if (
+            validation_loss
+            < best_validation_loss
+        ):
 
             best_validation_loss = (
                 validation_loss
+            )
+
+            best_validation_top1 = (
+                validation_top1
             )
 
             epochs_without_improvement = 0
@@ -1177,12 +1197,17 @@ def train(
 
                 validation_loss=
                     validation_loss,
+
+                validation_top1_accuracy=
+                    validation_top1,
             )
 
             print(
                 "✓ Best checkpoint updated "
-                f"(validation loss "
-                f"{best_validation_loss:.6f})"
+                f"(Validation Loss="
+                f"{best_validation_loss:.6f}, "
+                f"Top-1="
+                f"{best_validation_top1:.4%})"
             )
 
         else:
@@ -1192,6 +1217,10 @@ def train(
             print(
                 "Validation loss did not improve."
             )
+
+        # ----------------------------------------------------
+        # Early stopping
+        # ----------------------------------------------------
 
         if (
             early_stopping_patience
@@ -1207,6 +1236,10 @@ def train(
             )
 
             break
+
+    # ========================================================
+    # Final checkpoint
+    # ========================================================
 
     final_checkpoint_path = (
         save_dir
@@ -1228,7 +1261,14 @@ def train(
 
         validation_loss=
             validation_loss,
+
+        validation_top1_accuracy=
+            validation_top1,
     )
+
+    # ========================================================
+    # Finish
+    # ========================================================
 
     print()
     print("Training Finished")
@@ -1236,6 +1276,11 @@ def train(
     print(
         "Best validation loss:",
         f"{best_validation_loss:.6f}",
+    )
+
+    print(
+        "Top-1 at best checkpoint:",
+        f"{best_validation_top1:.4%}",
     )
 
     print(
@@ -1250,7 +1295,14 @@ def train(
     )
 
 
+# ============================================================
+# CLI
+# ============================================================
+
 def main() -> None:
+    """
+    --config으로 gin 파일을 받아 학습을 시작한다.
+    """
 
     parser = argparse.ArgumentParser(
         description=(
@@ -1272,6 +1324,7 @@ def main() -> None:
     )
 
     if not config_path.exists():
+
         raise FileNotFoundError(
             f"Gin config not found:\n"
             f"{config_path}"
@@ -1282,12 +1335,18 @@ def main() -> None:
         config_path,
     )
 
+    # gin 설정 로드
     gin.parse_config_file(
         str(config_path)
     )
 
+    # training 시작
     train()
 
+
+# ============================================================
+# Entry point
+# ============================================================
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import gin
 import torch
@@ -9,235 +9,284 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 
+# ============================================================
+# Constants
+# ============================================================
+
+NUM_CANDIDATES = 5
+NUM_POSITIVES = 1
+
+
+# ============================================================
+# Loss output
+# ============================================================
+
 class TransformerLossOutput(NamedTuple):
+    """
+    Transformer 학습에서 사용하는 loss 값.
+    """
+
     total_loss: Tensor
     preference_loss: Tensor
-    tie_loss: Tensor
 
+
+# ============================================================
+# Transformer loss
+# ============================================================
 
 @gin.configurable
 class TransformerLoss(nn.Module):
+
     def __init__(
         self,
         lambda_preference: float = 1.0,
-        lambda_tie: float = 0.1,
     ) -> None:
+
         super().__init__()
+
         self.lambda_preference = lambda_preference
-        self.lambda_tie = lambda_tie
+
+    # ========================================================
+    # Forward
+    # ========================================================
 
     def forward(
         self,
         candidate_scores: Tensor,
-        tie_scores: Optional[Tensor],
-        candidate_sids: Tensor,
         candidate_labels: Tensor,
-        candidate_mask: Tensor,
     ) -> TransformerLossOutput:
 
+        # ====================================================
+        # 1. Shape 검증
+        # ====================================================
+
+        # candidate_scores:
+        # [B, 5]
+
         if candidate_scores.ndim != 2:
+
             raise ValueError(
-                "candidate_scores must have shape [B,C]. "
+                "candidate_scores must have shape [B,5]. "
                 f"Received: {tuple(candidate_scores.shape)}"
             )
 
-        if candidate_labels.shape != candidate_scores.shape:
+        if (
+            candidate_scores.shape[1]
+            != NUM_CANDIDATES
+        ):
+
             raise ValueError(
-                "candidate_labels shape must match candidate_scores."
+                f"Expected {NUM_CANDIDATES} candidates, "
+                f"but received "
+                f"{candidate_scores.shape[1]}."
             )
 
-        if candidate_mask.shape != candidate_scores.shape:
+        # candidate_labels:
+        # [B, 5]
+
+        if (
+            candidate_labels.shape
+            != candidate_scores.shape
+        ):
+
             raise ValueError(
-                "candidate_mask shape must match candidate_scores."
+                "candidate_labels shape must match "
+                "candidate_scores shape."
             )
 
-        if candidate_sids.ndim != 3 or candidate_sids.shape[-1] != 3:
+        # ====================================================
+        # 2. Label type 변환
+        # ====================================================
+
+        candidate_labels = (
+            candidate_labels.float()
+        )
+
+        # ====================================================
+        # 3. Label 값 검증
+        #
+        # label은 반드시 0 또는 1
+        # ====================================================
+
+        valid_labels = (
+            (candidate_labels == 0)
+            | (candidate_labels == 1)
+        )
+
+        if not torch.all(valid_labels):
+
             raise ValueError(
-                "candidate_sids must have shape [B,C,3]."
+                "candidate_labels must contain "
+                "only 0 or 1."
             )
 
-        if candidate_sids.shape[:2] != candidate_scores.shape:
-            raise ValueError(
-                "candidate_sids [B,C] must match candidate_scores [B,C]."
+        # ====================================================
+        # 4. 각 row에 positive가 정확히 1개인지 확인
+        # ====================================================
+
+        positive_counts = (
+            candidate_labels.sum(
+                dim=1
             )
-
-        if tie_scores is not None and tie_scores.shape != candidate_scores.shape:
-            raise ValueError(
-                "tie_scores shape must match candidate_scores."
-            )
-
-        if self.lambda_tie > 0 and tie_scores is None:
-            raise ValueError(
-                "tie_scores is required when lambda_tie > 0."
-            )
-
-        candidate_labels = candidate_labels.float()
-        candidate_mask = candidate_mask.bool()
-
-        valid_scores = candidate_scores[candidate_mask]
-        valid_labels = candidate_labels[candidate_mask]
-
-        if valid_scores.numel() == 0:
-            raise ValueError(
-                "No valid candidates were found in the batch."
-            )
+        )
 
         if not torch.all(
-            (valid_labels == 0) | (valid_labels == 1)
+            positive_counts == NUM_POSITIVES
         ):
+
             raise ValueError(
-                "candidate_labels must contain only 0 or 1."
+                "Each sample must contain exactly "
+                f"{NUM_POSITIVES} positive candidate."
             )
 
-        candidate_probs = torch.exp(valid_scores)
-        candidate_probs = candidate_probs.clamp(
-            min=1e-7,
-            max=1.0 - 1e-7,
+        # ====================================================
+        # 5. Positive candidate 위치 찾기
+        #
+        # 예:
+        #
+        # labels
+        # [0, 0, 1, 0, 0]
+        #
+        #        ↓
+        #
+        # target_index = 2
+        # ====================================================
+
+        target_indices = (
+            candidate_labels.argmax(
+                dim=1
+            )
+            .long()
         )
 
-        preference_loss = F.binary_cross_entropy(
-            candidate_probs,
-            valid_labels,
+        # ====================================================
+        # 6. Preference loss
+        #
+        # candidate_scores:
+        #
+        # [-5.2, -3.1, -1.8, -4.7, -6.0]
+        #
+        # softmax:
+        #
+        # 후보 5개 사이의 상대 확률 계산
+        #
+        # Cross Entropy:
+        #
+        # positive 후보의 확률이 높아지도록 학습
+        # ====================================================
+
+        preference_loss = F.cross_entropy(
+            candidate_scores,
+            target_indices,
         )
 
-        tie_pair_losses = []
-
-        if tie_scores is not None:
-            batch_size = candidate_scores.shape[0]
-
-            for batch_idx in range(batch_size):
-                valid = candidate_mask[batch_idx]
-
-                sids = candidate_sids[batch_idx][valid]
-                labels = candidate_labels[batch_idx][valid]
-                scores = tie_scores[batch_idx][valid]
-
-                positive_indices = torch.where(
-                    labels == 1
-                )[0]
-
-                negative_indices = torch.where(
-                    labels == 0
-                )[0]
-
-                if (
-                    positive_indices.numel() == 0
-                    or negative_indices.numel() == 0
-                ):
-                    continue
-
-                negative_sids = sids[negative_indices]
-                negative_scores = scores[negative_indices]
-
-                for positive_idx in positive_indices:
-                    positive_sid = sids[positive_idx]
-                    positive_score = scores[positive_idx]
-
-                    collision_mask = (
-                        negative_sids
-                        == positive_sid.unsqueeze(0)
-                    ).all(dim=-1)
-
-                    if not collision_mask.any():
-                        continue
-
-                    collision_negative_scores = (
-                        negative_scores[collision_mask]
-                    )
-
-                    pair_loss = F.softplus(
-                        collision_negative_scores
-                        - positive_score
-                    )
-
-                    tie_pair_losses.append(
-                        pair_loss
-                    )
-
-        if tie_pair_losses:
-            tie_loss = torch.cat(
-                tie_pair_losses
-            ).mean()
-        else:
-            tie_loss = candidate_scores.new_zeros(())
+        # ====================================================
+        # 7. Total loss
+        #
+        # tie loss는 완전히 제거
+        # ====================================================
 
         total_loss = (
             self.lambda_preference
             * preference_loss
-            + self.lambda_tie
-            * tie_loss
         )
+
+        # ====================================================
+        # 8. 반환
+        # ====================================================
 
         return TransformerLossOutput(
             total_loss=total_loss,
             preference_loss=preference_loss,
-            tie_loss=tie_loss,
         )
 
 
+# ============================================================
+# Simple test
+# ============================================================
+
 if __name__ == "__main__":
+
+    # ========================================================
+    # Example candidate scores
+    #
+    # Batch size = 2
+    # 후보 = 5개
+    #
+    # score는 log probability 기반이므로
+    # 음수여도 정상
+    # ========================================================
+
     candidate_scores = torch.tensor(
         [
-            [-0.5, -0.5, -4.0, -6.0],
-            [-1.0, -1.0, -5.0, 0.0],
+            [
+                -5.0,
+                -3.0,
+                -1.5,
+                -4.0,
+                -6.0,
+            ],
+            [
+                -2.0,
+                -4.0,
+                -5.0,
+                -1.0,
+                -3.0,
+            ],
         ],
         dtype=torch.float32,
     )
 
-    candidate_sids = torch.tensor(
-        [
-            [
-                [4, 72, 301],
-                [4, 72, 301],
-                [3, 15, 100],
-                [8, 22, 50],
-            ],
-            [
-                [2, 31, 120],
-                [2, 31, 120],
-                [5, 10, 80],
-                [0, 0, 0],
-            ],
-        ],
-        dtype=torch.long,
-    )
+    # ========================================================
+    # Positive label
+    #
+    # 첫 번째 sample:
+    # candidate index 2가 positive
+    #
+    # 두 번째 sample:
+    # candidate index 3이 positive
+    # ========================================================
 
     candidate_labels = torch.tensor(
         [
-            [1.0, 0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0, 0.0],
+            [
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+            ],
+            [
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+            ],
         ],
         dtype=torch.float32,
     )
 
-    candidate_mask = torch.tensor(
-        [
-            [True, True, True, True],
-            [True, True, True, False],
-        ],
-        dtype=torch.bool,
-    )
-
-    tie_scores = torch.tensor(
-        [
-            [1.8, 0.4, 0.3, 0.1],
-            [1.2, 0.7, 0.2, 0.0],
-        ],
-        dtype=torch.float32,
-    )
+    # ========================================================
+    # Loss function
+    # ========================================================
 
     loss_fn = TransformerLoss(
         lambda_preference=1.0,
-        lambda_tie=0.1,
     )
+
+    # ========================================================
+    # Loss 계산
+    # ========================================================
 
     loss_output = loss_fn(
         candidate_scores=candidate_scores,
-        tie_scores=tie_scores,
-        candidate_sids=candidate_sids,
         candidate_labels=candidate_labels,
-        candidate_mask=candidate_mask,
     )
+
+    # ========================================================
+    # 결과 출력
+    # ========================================================
 
     print(
         "Total loss:",
@@ -249,7 +298,27 @@ if __name__ == "__main__":
         loss_output.preference_loss.item(),
     )
 
+    # ========================================================
+    # 참고:
+    # 사람이 확인하기 위한 candidate probability
+    # ========================================================
+
+    candidate_probs = torch.softmax(
+        candidate_scores,
+        dim=1,
+    )
+
+    print()
     print(
-        "Tie loss:",
-        loss_output.tie_loss.item(),
+        "Candidate probabilities:"
+    )
+
+    print(
+        candidate_probs
+    )
+
+    print()
+    print(
+        "Probability sums:",
+        candidate_probs.sum(dim=1),
     )

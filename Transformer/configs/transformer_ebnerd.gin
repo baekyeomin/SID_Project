@@ -1,31 +1,103 @@
+# ============================================================
+# Dataset
+# ============================================================
+
+# 사용자 클릭 history에서 최근 기사 최대 20개까지만 사용
 NewsSequenceDataset.max_history_length = 20
+
+# 클릭 history가 비어 있는 row는 학습/평가에서 제외
 NewsSequenceDataset.drop_empty_history = True
+
+# SID 길이, 후보 수, label, 중복 SID 등이 올바른지 검사
 NewsSequenceDataset.validate_data = True
 
+
+# ============================================================
+# Semantic ID vocabulary size
+# ============================================================
+
+# c1(category)에서 사용할 전체 code 개수
 NewsEncoderDecoderTransformer.c1_vocab_size = 25
+
+# c2(event)에서 사용할 전체 code 개수
 NewsEncoderDecoderTransformer.c2_vocab_size = 128
+
+# c3(residual semantic code)에서 사용할 전체 code 개수
 NewsEncoderDecoderTransformer.c3_vocab_size = 512
+
+# c4(article discriminator) code 개수 - history SID 표현에 사용
 NewsEncoderDecoderTransformer.c4_vocab_size = 28
 
+
+# ============================================================
+# Transformer architecture
+# ============================================================
+
+# Transformer 내부 embedding 및 hidden representation 차원
 NewsEncoderDecoderTransformer.d_model = 384
+
+# Multi-Head Attention의 attention head 개수
 NewsEncoderDecoderTransformer.num_heads = 6
+
+# Feed Forward Network 내부 hidden dimension
 NewsEncoderDecoderTransformer.d_ff = 1024
+
+# Transformer encoder/decoder layer 개수
 NewsEncoderDecoderTransformer.num_layers = 4
+
+# 학습 중 overfitting 방지를 위한 dropout 비율
 NewsEncoderDecoderTransformer.dropout_rate = 0.1
+
+# history의 기사 사이를 구분하기 위한 SEP token 사용 여부
 NewsEncoderDecoderTransformer.use_sep = True
 
-TransformerLoss.lambda_preference = 1.0
-TransformerLoss.lambda_tie = 0.1
 
-train.train_path = "datasets/ebnerd/train_sequences.parquet"
-train.validation_path = "datasets/ebnerd/validation_sequences_half.parquet"
+# ============================================================
+# Loss
+# ============================================================
+
+# positive candidate의 점수가 negative보다 높아지도록 하는 preference loss 가중치
+TransformerLoss.lambda_preference = 1.0
+
+
+# ============================================================
+# Dataset paths
+# ============================================================
+
+# 1 positive + 4 negative로 전처리 완료된 training dataset
+train.train_path = "datasets/ebnerd/train_sequences_1pos4neg.parquet"
+
+# 기존 validation을 시간순 앞 50%로 분리한 validation dataset
+train.validation_path = "datasets/ebnerd/validation_sequences_1pos4neg_half.parquet"
+
+# Transformer checkpoint 및 학습 결과 저장 폴더
 train.save_dir = "out/transformer/ebnerd"
 
+
+# ============================================================
+# Training hyperparameters
+# ============================================================
+
+# 한 번의 parameter update에 사용할 학습 sample 수
 train.batch_size = 128
+
+# 전체 training dataset을 최대 30번 반복 학습
 train.num_epochs = 30
+
+# optimizer의 초기 learning rate
 train.learning_rate = 0.0001
+
+# 과적합 방지를 위한 weight decay 크기
 train.weight_decay = 0.01
+
+# gradient exploding 방지를 위한 gradient norm 최대값
 train.gradient_clip_norm = 1.0
+
+# DataLoader에서 별도 worker process를 사용하지 않음
 train.num_workers = 0
+
+# 데이터 shuffle 및 초기화 결과 재현을 위한 random seed
 train.seed = 42
+
+# validation 성능이 5 epoch 연속 개선되지 않으면 학습 조기 종료
 train.early_stopping_patience = 5
