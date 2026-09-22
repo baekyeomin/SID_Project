@@ -1,79 +1,30 @@
-# 사용자 클릭 history에서 최근 기사 최대 20개 사용
 NewsSequenceDataset.max_history_length = 20
-
-# history가 비어 있는 sample은 제외
 NewsSequenceDataset.drop_empty_history = True
-
-# SID 길이, 후보 수, label 등을 검증
 NewsSequenceDataset.validate_data = True
 
-
-# MIND category(c1) 개수
 NewsEncoderDecoderTransformer.c1_vocab_size = 18
-
-# MIND RQ-VAE Q2 codebook 크기
 NewsEncoderDecoderTransformer.c2_vocab_size = 1024
-
-# MIND RQ-VAE Q3 codebook 크기
 NewsEncoderDecoderTransformer.c3_vocab_size = 1024
-
-# MIND에서 실제 생성된 c4의 vocabulary 크기
 NewsEncoderDecoderTransformer.c4_vocab_size = 33
 
-
-# Transformer hidden / embedding 차원
 NewsEncoderDecoderTransformer.d_model = 384
-
-# Multi-Head Attention head 개수
 NewsEncoderDecoderTransformer.num_heads = 6
-
-# Feed Forward Network 내부 hidden 차원
 NewsEncoderDecoderTransformer.d_ff = 1024
-
-# Encoder / Decoder layer 개수
 NewsEncoderDecoderTransformer.num_layers = 4
-
-# Dropout 비율
 NewsEncoderDecoderTransformer.dropout_rate = 0.1
-
-# history 기사 사이 SEP token 사용
 NewsEncoderDecoderTransformer.use_sep = True
 
-
-# Positive 후보를 높게 학습시키는 preference loss 가중치
 TransformerLoss.lambda_preference = 1.0
 
-
-# 1 positive + 4 negative로 전처리된 MIND train 파일
 train.train_path = "datasets/mind/train_sequences_1pos4neg.parquet"
-
-# validation 원본을 시간순 앞 50%로 분리한 validation 파일
 train.validation_path = "datasets/mind/validation_sequences_1pos4neg_half.parquet"
-
-# MIND Transformer checkpoint 저장 위치
 train.save_dir = "out/transformer/mind"
 
-
-# 한 batch에 사용할 sample 수
 train.batch_size = 128
-
-# 최대 학습 epoch
 train.num_epochs = 30
-
-# Transformer learning rate
 train.learning_rate = 0.0001
-
-# AdamW weight decay
 train.weight_decay = 0.01
-
-# Gradient exploding 방지
 train.gradient_clip_norm = 1.0
-
-# DataLoader worker 수
 train.num_workers = 0
-
-# 실험 재현을 위한 seed
 train.seed = 42
-
-# validation loss가 5 epoch 동안 개선되지 않으면 조기 종료
 train.early_stopping_patience = 5
