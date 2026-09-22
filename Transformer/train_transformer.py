@@ -56,7 +56,12 @@ def create_metric_dict() -> Dict[str, float]:
 
 
 @torch.no_grad()
-def update_metrics(metrics: Dict[str, float], loss_output, model_output, candidate_labels: torch.Tensor) -> None:
+def update_metrics(
+    metrics: Dict[str, float],
+    loss_output,
+    model_output,
+    candidate_labels: torch.Tensor,
+) -> None:
     # 한 batch의 loss, score, probability, Top-1 결과 누적
     candidate_labels = candidate_labels.float()
     candidate_scores = model_output.candidate_scores
@@ -91,7 +96,10 @@ def update_metrics(metrics: Dict[str, float], loss_output, model_output, candida
     metrics["num_negative_candidates"] += num_negative
 
 
-def finalize_metrics(metrics: Dict[str, float], loss_fn: TransformerLoss) -> Dict[str, float]:
+def finalize_metrics(
+    metrics: Dict[str, float],
+    loss_fn: TransformerLoss,
+) -> Dict[str, float]:
     # epoch 누적값을 평균 metric으로 변환
     num_impressions = int(metrics["num_impressions"])
     num_positive = int(metrics["num_positive_candidates"])
@@ -103,10 +111,30 @@ def finalize_metrics(metrics: Dict[str, float], loss_fn: TransformerLoss) -> Dic
     preference_loss = metrics["preference_loss_sum"] / num_impressions
     total_loss = loss_fn.lambda_preference * preference_loss
 
-    positive_score = metrics["positive_score_sum"] / num_positive if num_positive > 0 else float("nan")
-    negative_score = metrics["negative_score_sum"] / num_negative if num_negative > 0 else float("nan")
-    positive_prob = metrics["positive_prob_sum"] / num_positive if num_positive > 0 else float("nan")
-    negative_prob = metrics["negative_prob_sum"] / num_negative if num_negative > 0 else float("nan")
+    positive_score = (
+        metrics["positive_score_sum"] / num_positive
+        if num_positive > 0
+        else float("nan")
+    )
+
+    negative_score = (
+        metrics["negative_score_sum"] / num_negative
+        if num_negative > 0
+        else float("nan")
+    )
+
+    positive_prob = (
+        metrics["positive_prob_sum"] / num_positive
+        if num_positive > 0
+        else float("nan")
+    )
+
+    negative_prob = (
+        metrics["negative_prob_sum"] / num_negative
+        if num_negative > 0
+        else float("nan")
+    )
+
     top1_accuracy = metrics["top1_correct"] / num_impressions
 
     return {
@@ -147,25 +175,43 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
 
         # Forward
-        model_output = model(history_sids=history_sids, history_mask=history_mask, candidate_sids=candidate_sids)
+        model_output = model(
+            history_sids=history_sids,
+            history_mask=history_mask,
+            candidate_sids=candidate_sids,
+        )
 
         # Loss
-        loss_output = loss_fn(candidate_scores=model_output.candidate_scores, candidate_labels=candidate_labels)
+        loss_output = loss_fn(
+            candidate_scores=model_output.candidate_scores,
+            candidate_labels=candidate_labels,
+        )
 
         # Backpropagation
         loss_output.total_loss.backward()
 
         # Gradient clipping
         if gradient_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                max_norm=gradient_clip_norm,
+            )
 
         # Parameter update
         optimizer.step()
 
         # Metric update
-        update_metrics(metrics=metrics, loss_output=loss_output, model_output=model_output, candidate_labels=candidate_labels)
+        update_metrics(
+            metrics=metrics,
+            loss_output=loss_output,
+            model_output=model_output,
+            candidate_labels=candidate_labels,
+        )
 
-    return finalize_metrics(metrics=metrics, loss_fn=loss_fn)
+    return finalize_metrics(
+        metrics=metrics,
+        loss_fn=loss_fn,
+    )
 
 
 @torch.no_grad()
@@ -187,24 +233,65 @@ def evaluate(
         candidate_labels = batch["candidate_labels"].to(device, non_blocking=True)
 
         # Forward
-        model_output = model(history_sids=history_sids, history_mask=history_mask, candidate_sids=candidate_sids)
+        model_output = model(
+            history_sids=history_sids,
+            history_mask=history_mask,
+            candidate_sids=candidate_sids,
+        )
 
         # Loss
-        loss_output = loss_fn(candidate_scores=model_output.candidate_scores, candidate_labels=candidate_labels)
+        loss_output = loss_fn(
+            candidate_scores=model_output.candidate_scores,
+            candidate_labels=candidate_labels,
+        )
 
         # Metric
-        update_metrics(metrics=metrics, loss_output=loss_output, model_output=model_output, candidate_labels=candidate_labels)
+        update_metrics(
+            metrics=metrics,
+            loss_output=loss_output,
+            model_output=model_output,
+            candidate_labels=candidate_labels,
+        )
 
-    return finalize_metrics(metrics=metrics, loss_fn=loss_fn)
+    return finalize_metrics(
+        metrics=metrics,
+        loss_fn=loss_fn,
+    )
 
 
-def print_metrics(split_name: str, metrics: Dict[str, float]) -> None:
+def print_metrics(
+    split_name: str,
+    metrics: Dict[str, float],
+) -> None:
     # train/validation 주요 metric 출력
-    print(f"{split_name} Loss={metrics['total_loss']:.6f} | Preference={metrics['preference_loss']:.6f}")
-    print(f"{split_name} Top-1 Accuracy={metrics['top1_accuracy']:.4%} | Correct={int(metrics['top1_correct']):,}/{int(metrics['num_impressions']):,}")
-    print(f"{split_name} Score | Positive={metrics['positive_score']:.4f} | Negative={metrics['negative_score']:.4f}")
-    print(f"{split_name} Probability | Positive={metrics['positive_prob']:.6f} | Negative={metrics['negative_prob']:.6f}")
-    print(f"{split_name} Candidates | Positive={int(metrics['num_positive_candidates']):,} | Negative={int(metrics['num_negative_candidates']):,}")
+    print(
+        f"{split_name} Loss={metrics['total_loss']:.6f} | "
+        f"Preference={metrics['preference_loss']:.6f}"
+    )
+
+    print(
+        f"{split_name} Top-1 Accuracy={metrics['top1_accuracy']:.4%} | "
+        f"Correct={int(metrics['top1_correct']):,}/"
+        f"{int(metrics['num_impressions']):,}"
+    )
+
+    print(
+        f"{split_name} Score | "
+        f"Positive={metrics['positive_score']:.4f} | "
+        f"Negative={metrics['negative_score']:.4f}"
+    )
+
+    print(
+        f"{split_name} Probability | "
+        f"Positive={metrics['positive_prob']:.6f} | "
+        f"Negative={metrics['negative_prob']:.6f}"
+    )
+
+    print(
+        f"{split_name} Candidates | "
+        f"Positive={int(metrics['num_positive_candidates']):,} | "
+        f"Negative={int(metrics['num_negative_candidates']):,}"
+    )
 
 
 def save_checkpoint(
@@ -269,11 +356,18 @@ def train(
         raise FileNotFoundError(f"Train file not found:\n{train_path}")
 
     if not validation_path.exists():
-        raise FileNotFoundError(f"Validation file not found:\n{validation_path}")
+        raise FileNotFoundError(
+            f"Validation file not found:\n{validation_path}"
+        )
 
     # Dataset
-    train_dataset = NewsSequenceDataset(parquet_path=str(train_path))
-    validation_dataset = NewsSequenceDataset(parquet_path=str(validation_path))
+    train_dataset = NewsSequenceDataset(
+        parquet_path=str(train_path)
+    )
+
+    validation_dataset = NewsSequenceDataset(
+        parquet_path=str(validation_path)
+    )
 
     print("Train samples      :", f"{len(train_dataset):,}")
     print("Validation samples :", f"{len(validation_dataset):,}")
@@ -300,11 +394,24 @@ def train(
     # Model / Loss / Optimizer
     model = NewsEncoderDecoderTransformer().to(device)
     loss_fn = TransformerLoss().to(device)
-    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
 
     # Parameter count
-    total_parameters = sum(p.numel() for p in model.parameters())
-    trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_parameters = sum(
+        p.numel()
+        for p in model.parameters()
+    )
+
+    trainable_parameters = sum(
+        p.numel()
+        for p in model.parameters()
+        if p.requires_grad
+    )
 
     print("Total parameters     :", f"{total_parameters:,}")
     print("Trainable parameters :", f"{trainable_parameters:,}")
@@ -313,15 +420,28 @@ def train(
     print()
     print("Before Training")
 
-    initial_validation_metrics = evaluate(model=model, loss_fn=loss_fn, dataloader=validation_loader, device=device)
-    print_metrics("Validation", initial_validation_metrics)
+    initial_validation_metrics = evaluate(
+        model=model,
+        loss_fn=loss_fn,
+        dataloader=validation_loader,
+        device=device,
+    )
+
+    print_metrics(
+        "Validation",
+        initial_validation_metrics,
+    )
 
     # Best model tracking
+    # checkpoint_best는 Validation Top-1 Accuracy 기준
+    best_validation_top1 = -float("inf")
     best_validation_loss = float("inf")
-    best_validation_top1 = 0.0
     epochs_without_improvement = 0
 
-    save_dir.mkdir(parents=True, exist_ok=True)
+    save_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     epoch = 0
     validation_loss = float("inf")
@@ -341,11 +461,24 @@ def train(
             device=device,
             gradient_clip_norm=gradient_clip_norm,
         )
-        print_metrics("Train", train_metrics)
+
+        print_metrics(
+            "Train",
+            train_metrics,
+        )
 
         # Validation
-        validation_metrics = evaluate(model=model, loss_fn=loss_fn, dataloader=validation_loader, device=device)
-        print_metrics("Validation", validation_metrics)
+        validation_metrics = evaluate(
+            model=model,
+            loss_fn=loss_fn,
+            dataloader=validation_loader,
+            device=device,
+        )
+
+        print_metrics(
+            "Validation",
+            validation_metrics,
+        )
 
         validation_loss = validation_metrics["total_loss"]
         validation_top1 = validation_metrics["top1_accuracy"]
@@ -361,9 +494,10 @@ def train(
         )
 
         # Best checkpoint
-        if validation_loss < best_validation_loss:
-            best_validation_loss = validation_loss
+        # Validation Top-1 Accuracy가 가장 높은 epoch를 best로 선택
+        if validation_top1 > best_validation_top1:
             best_validation_top1 = validation_top1
+            best_validation_loss = validation_loss
             epochs_without_improvement = 0
 
             save_checkpoint(
@@ -375,19 +509,35 @@ def train(
                 validation_top1_accuracy=validation_top1,
             )
 
-            print(f"✓ Best checkpoint updated (Validation Loss={best_validation_loss:.6f}, Top-1={best_validation_top1:.4%})")
+            print(
+                f"✓ Best checkpoint updated "
+                f"(Validation Top-1={best_validation_top1:.4%}, "
+                f"Loss={best_validation_loss:.6f})"
+            )
 
         else:
             epochs_without_improvement += 1
-            print("Validation loss did not improve.")
+
+            print(
+                "Validation Top-1 did not improve."
+            )
 
         # Early stopping
-        if early_stopping_patience is not None and epochs_without_improvement >= early_stopping_patience:
-            print(f"Early stopping. No validation improvement for {early_stopping_patience} epochs.")
+        if (
+            early_stopping_patience is not None
+            and epochs_without_improvement >= early_stopping_patience
+        ):
+            print(
+                f"Early stopping. "
+                f"No validation Top-1 improvement for "
+                f"{early_stopping_patience} epochs."
+            )
             break
 
     # Final checkpoint
-    final_checkpoint_path = save_dir / "checkpoint_final.pt"
+    final_checkpoint_path = (
+        save_dir / "checkpoint_final.pt"
+    )
 
     save_checkpoint(
         path=final_checkpoint_path,
@@ -400,25 +550,58 @@ def train(
 
     print()
     print("Training Finished")
-    print("Best validation loss:", f"{best_validation_loss:.6f}")
-    print("Top-1 at best checkpoint:", f"{best_validation_top1:.4%}")
-    print("Best checkpoint:", save_dir / "checkpoint_best.pt")
-    print("Final checkpoint:", final_checkpoint_path)
+    print(
+        "Best validation Top-1:",
+        f"{best_validation_top1:.4%}",
+    )
+    print(
+        "Loss at best checkpoint:",
+        f"{best_validation_loss:.6f}",
+    )
+    print(
+        "Best checkpoint:",
+        save_dir / "checkpoint_best.pt",
+    )
+    print(
+        "Final checkpoint:",
+        final_checkpoint_path,
+    )
 
 
 def main() -> None:
     # --config으로 gin 파일을 받아 학습 시작
-    parser = argparse.ArgumentParser(description="Train News Semantic-ID Encoder-Decoder Transformer")
-    parser.add_argument("--config", type=str, required=True)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train News Semantic-ID Encoder-Decoder Transformer"
+        )
+    )
+
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+    )
+
     args = parser.parse_args()
 
-    config_path = resolve_path(args.config)
+    config_path = resolve_path(
+        args.config
+    )
 
     if not config_path.exists():
-        raise FileNotFoundError(f"Gin config not found:\n{config_path}")
+        raise FileNotFoundError(
+            f"Gin config not found:\n{config_path}"
+        )
 
-    print("Gin config:", config_path)
-    gin.parse_config_file(str(config_path))
+    print(
+        "Gin config:",
+        config_path,
+    )
+
+    gin.parse_config_file(
+        str(config_path)
+    )
+
     train()
 
 
