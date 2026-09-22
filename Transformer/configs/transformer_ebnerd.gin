@@ -11,7 +11,7 @@ NewsEncoderDecoderTransformer.c3_vocab_size = 512
 NewsEncoderDecoderTransformer.c4_vocab_size = 28
 
 
-# transformer architecture --------------------
+# Transformer architecture --------------------
 # Transformer 내부 embedding 및 hidden representation 차원
 NewsEncoderDecoderTransformer.d_model = 384
 
@@ -30,13 +30,17 @@ NewsEncoderDecoderTransformer.dropout_rate = 0.1
 # history의 기사 사이를 구분하기 위한 SEP token 사용 여부
 NewsEncoderDecoderTransformer.use_sep = True
 
+
 # Loss ----------------------------------
 # preference loss 가중치
 TransformerLoss.lambda_preference = 1.0
 
+
 # Dataset paths --------------------------
-train.train_path = "datasets/ebnerd/train_sequences_1pos4neg.parquet"
-train.validation_path = "datasets/ebnerd/validation_sequences_1pos4neg_half.parquet"
+train.train_path = "/home/ubuntu/shared/datasets/ebnerd/train_sequences_1pos4neg.parquet"
+train.validation_path = "/home/ubuntu/shared/datasets/ebnerd/validation_sequences_1pos4neg_half.parquet"
+
+# 모델 checkpoint 저장 위치
 train.save_dir = "out/transformer/ebnerd"
 
 
@@ -45,10 +49,13 @@ train.batch_size = 128
 train.num_epochs = 30
 train.learning_rate = 0.0001
 train.weight_decay = 0.01
-# 역전파 중 gradient가 너무 커져서 학습이 불안정해지는 걸 막기 위해 gradient 크기를 최대 1.0으로 제한
+
+# 역전파 중 gradient가 너무 커져서 학습이 불안정해지는 것을 막기 위해
+# gradient 크기를 최대 1.0으로 제한
 train.gradient_clip_norm = 1.0
 
 # DataLoader가 별도 CPU worker 없이 메인 프로세스 하나에서 데이터를 불러오도록 설정
 train.num_workers = 0
+
 train.seed = 42
 train.early_stopping_patience = 5
