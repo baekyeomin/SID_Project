@@ -1,3 +1,39 @@
+# validation 단계에서 eventid 사용없이 각 기사를 독립적으로 train 기사에 매칭하도록 변경한 신버전
+#
+# Train 사건 구성
+# - 이전: event_id로 그룹화
+# - 변경: 유지
+#
+# Train 사건 대표
+# - 이전: z(E) = mean(h(a))
+# - 변경: 유지
+#
+# Validation-only 매칭 단위
+# - 이전: 사건 단위
+# - 변경: 기사 단위
+#
+# 매칭에 사용하는 임베딩
+# - 이전: 사건의 첫 기사 h(a1)
+# - 변경: 각 기사 h(a)
+#
+# Train 사건 선택
+# - 이전: 코사인 유사도 최대
+# - 변경: 유지
+#
+# 72시간 조건
+# - 이전: 사건의 첫 기사 발행 시각 기준
+# - 변경: 각 기사 발행 시각 기준
+#**기사에 발행 시각 정보가 없거나 만족하는 시간 조건이 없다면 코사인 유사도로만 판별
+#
+# C2 부여
+# - 이전: 동일 Validation 사건의 모든 기사에 동일 C2
+# - 변경: 기사별로 매칭된 Train 사건의 C2 상속
+#
+# 기존 Train 기사
+# - 이전: 기존 SID 재사용
+# - 변경: 유지
+
+
 import argparse
 import importlib
 from pathlib import Path
@@ -66,7 +102,7 @@ class SemanticIdDataset(Dataset):
         if missing_columns:
             raise ValueError(f"{self.master_path} " "is missing required columns: " f"{sorted(missing_columns)}")
 
-        if (self.master["event_id"].isna().any()):
+        if ("event_id" in self.master.columns and self.master["event_id"].isna().any()):
             missing_count = int(self.master["event_id"].isna().sum())
 
             raise ValueError(f"{self.master_path} contains " f"{missing_count} missing " "event_id values.")
@@ -491,133 +527,39 @@ def encode_selected_articles(model: RqVae, dataset: SemanticIdDataset, positions
     return np.concatenate(vectors) if vectors else np.empty((0, model.embed_dim), dtype=np.float32)
 
 
-# 변경: 신규 사건도 반드시 Train EventCode를 상속하도록 매칭
-def match_validation_events_to_train(
-    model: RqVae,
-    validation_dataset: SemanticIdDataset,
-    new_event_ids: Set[int],
-    train_event_representations: dict[int, np.ndarray],
-    train_master: pd.DataFrame,
-    device: torch.device,
-    batch_size: int = 512,
-    event_time_window_days: Optional[float] = 3.0,
-) -> dict[int, dict]:
-
-
-    if not new_event_ids:
-        return {}
+# Validation-only 기사를 각각 독립적으로 Train 사건에 매칭
+def match_validation_articles_to_train(model: RqVae, validation_dataset: SemanticIdDataset, positions: list[int], train_event_representations: dict[int, np.ndarray], train_master: pd.DataFrame, device: torch.device, batch_size: int = 512, event_time_window_days: Optional[float] = 3.0) -> pd.DataFrame:
+    if not positions:
+        return pd.DataFrame(columns=["article_id", "matched_train_event_id", "event_c2", "match_cosine", "match_used_time_window"])
     if not train_event_representations:
-        raise ValueError("Train EventCode가 없으므로 신규 Validation 사건을 상속시킬 수 없습니다.")
-
+        raise ValueError("Train 사건 대표 벡터가 없습니다.")
     valid_master = validation_dataset.master
     valid_times, valid_time_column = get_publication_times(valid_master)
     train_times, train_time_column = get_publication_times(train_master)
-    if valid_time_column is None:
-        warnings.warn("Validation 발행 시각 컬럼 없음: 첫 DataFrame 행을 최초 관측 기사로 사용합니다. 시간 누수 방지 검증이 필요합니다.")
     if event_time_window_days is not None and (valid_time_column is None or train_time_column is None):
-        warnings.warn("발행 시각 컬럼 부족: Time Window를 적용할 수 없어 cosine 유사도로만 매칭합니다.")
-
-    first_rows = []
-    for event_id in sorted(new_event_ids):
-        positions = np.flatnonzero(valid_master["event_id"].to_numpy() == event_id)
-        if not len(positions):
-            raise ValueError(f"Validation event_id={event_id}의 기사를 찾을 수 없습니다.")
-        valid_positions = [int(pos) for pos in positions if pd.notna(valid_times.iloc[pos])]
-        first_position = min(valid_positions, key=lambda pos: (valid_times.iloc[pos], pos)) if valid_positions else int(positions[0])
-        first_rows.append((event_id, first_position, valid_times.iloc[first_position]))
-
-    first_embeddings = encode_selected_articles(model, validation_dataset, [pos for _, pos, _ in first_rows], device, batch_size)
+        warnings.warn("발행 시각 컬럼 부족: 시간 조건 없이 코사인 유사도로 매칭합니다.")
     train_event_ids = sorted(train_event_representations)
     train_vectors = np.stack([train_event_representations[e] for e in train_event_ids]).astype(np.float32)
     train_vectors /= np.maximum(np.linalg.norm(train_vectors, axis=1, keepdims=True), 1e-12)
-    first_embeddings /= np.maximum(np.linalg.norm(first_embeddings, axis=1, keepdims=True), 1e-12)
-
-    train_master = train_master.reset_index(drop=True)
-
     train_last_times = {}
     if train_time_column is not None:
-        train_last_times = (
-            pd.DataFrame({"event_id": train_master["event_id"], "timestamp": train_times})
-            .groupby("event_id")["timestamp"].max().to_dict()
-        )
-
-    matched = {}
-    for i, (event_id, position, first_time) in enumerate(first_rows):
-        similarity = train_vectors @ first_embeddings[i]
-        eligible = np.ones(len(train_event_ids), dtype=bool)
-        if event_time_window_days is not None and pd.notna(first_time) and train_last_times:
-            # 변경: 미래 Train 사건을 제외하고, 최초 기사 기준 과거 72시간만 후보로 사용
-            time_differences = np.array([
-                (first_time - train_last_times[t]).total_seconds() / 3600
-                if pd.notna(train_last_times.get(t)) else np.inf
-                for t in train_event_ids
-            ])
-            eligible = (time_differences >= 0) & (time_differences <= event_time_window_days * 24)
-        used_time_window = bool(eligible.any()) and bool(event_time_window_days is not None and pd.notna(first_time) and train_last_times)
-
-        # 변경: 72시간 내 후보가 없으면 전체 Train 사건에서 유사도 최고 선택
-        if not eligible.any():
-            eligible[:] = True
-            used_time_window = False
-        best = int(np.argmax(np.where(eligible, similarity, -np.inf)))
-        matched[event_id] = {
-            "matched_train_event_id": int(train_event_ids[best]),
-            "match_cosine": float(similarity[best]),
-            "match_used_time_window": used_time_window,
-            "match_article_id": str(valid_master.iloc[position]["article_id"]),
-        }
-    return matched
-
-
-def build_validation_event_c2_mapping(
-    model: RqVae,
-    validation_dataset: SemanticIdDataset,
-    train_event_mapping: pd.DataFrame,
-    train_event_representations: dict[int, np.ndarray],
-    train_master: pd.DataFrame,
-    device: torch.device,
-    batch_size: int = 512,
-    num_workers: int = 0,
-    event_time_window_days: Optional[float] = 3.0,
-) -> pd.DataFrame:
-
-    train_event_to_c2 = dict(zip(train_event_mapping["event_id"].astype(int), train_event_mapping["event_c2"].astype(int), ))
-    validation_event_ids = set(validation_dataset.master["event_id"].astype(int))
-    new_event_ids = validation_event_ids - set(train_event_to_c2)
-    print(f"\nValidation events: {len(validation_event_ids)} | new events: {len(new_event_ids)}")
-
-    new_event_matches = match_validation_events_to_train(
-        model=model,
-        validation_dataset=validation_dataset,
-        new_event_ids=new_event_ids,
-        train_event_representations=train_event_representations,
-        train_master=train_master,
-        device=device,
-        batch_size=batch_size,
-        event_time_window_days=event_time_window_days,
-    )
-    event_counts = validation_dataset.master.groupby("event_id").size().to_dict()
+        train_last_times = pd.DataFrame({"event_id": train_master["event_id"].to_numpy(), "timestamp": train_times.to_numpy()}).groupby("event_id")["timestamp"].max().to_dict()
+    article_vectors = encode_selected_articles(model, validation_dataset, positions, device, batch_size)
+    article_vectors /= np.maximum(np.linalg.norm(article_vectors, axis=1, keepdims=True), 1e-12)
     rows = []
-    for event_id in sorted(validation_event_ids):
-        if event_id in train_event_to_c2:
-            matched_id, source, cosine, used_window, article_id = event_id, "inherited_train_event", np.nan, False, None
-        else:
-            match = new_event_matches[event_id]
-            matched_id = match["matched_train_event_id"]
-            source = "matched_train_event"
-            cosine = match["match_cosine"]
-            used_window = match["match_used_time_window"]
-            article_id = match["match_article_id"]
-        rows.append({
-            "event_id": int(event_id),
-            "event_c2": int(train_event_to_c2[matched_id]),
-            "num_articles": int(event_counts[event_id]),
-            "source": source,
-            "matched_train_event_id": int(matched_id),
-            "match_cosine": cosine,
-            "match_used_time_window": used_window,
-            "match_article_id": article_id,
-        })
+    for i, position in enumerate(positions):
+        similarity = train_vectors @ article_vectors[i]
+        first_time = valid_times.iloc[position]
+        eligible = np.ones(len(train_event_ids), dtype=bool)
+        used_window = False
+        if event_time_window_days is not None and pd.notna(first_time) and train_last_times:
+            hours = np.array([(first_time - train_last_times[e]).total_seconds() / 3600 if pd.notna(train_last_times.get(e)) else np.inf for e in train_event_ids])
+            eligible = (hours >= 0) & (hours <= event_time_window_days * 24)
+            used_window = bool(eligible.any())
+            if not used_window:
+                eligible[:] = True
+        best = int(np.argmax(np.where(eligible, similarity, -np.inf)))
+        rows.append({"article_id": str(valid_master.iloc[position]["article_id"]), "matched_train_event_id": int(train_event_ids[best]), "match_cosine": float(similarity[best]), "match_used_time_window": used_window})
     return pd.DataFrame(rows)
 
 
@@ -653,22 +595,11 @@ def generate_validation_semantic_ids(
         train_article_lookup[article_id] = (int(row.c1), int(row.c2), int(row.c3), )
 
 
-    validation_event_mapping = (
-        build_validation_event_c2_mapping(
-            model=model,
-            validation_dataset=dataset,
-            train_event_mapping=(train_event_mapping),
-            train_event_representations=train_event_representations,
-            train_master=train_master,
-            device=device,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            event_time_window_days=event_time_window_days,
-        )
-    )
-
-    validation_event_to_c2 = { int(row.event_id): int(row.event_c2)  for row in (validation_event_mapping.itertuples(index=False)) }
-
+    inference_master_positions = [i for i, article_id in enumerate(dataset.master["article_id"].astype(str)) if article_id not in train_article_lookup]
+    validation_article_mapping = match_validation_articles_to_train(model, dataset, inference_master_positions, train_event_representations, train_master, device, batch_size, event_time_window_days)
+    train_event_to_c2 = dict(zip(train_event_mapping["event_id"].astype(int), train_event_mapping["event_c2"].astype(int)))
+    validation_article_mapping["event_c2"] = validation_article_mapping["matched_train_event_id"].map(train_event_to_c2).astype(int) if len(validation_article_mapping) else pd.Series(dtype=int)
+    validation_article_to_c2 = dict(zip(validation_article_mapping["article_id"], validation_article_mapping["event_c2"]))
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, drop_last=False, num_workers=num_workers, pin_memory=(device.type == "cuda"), )
 
@@ -732,10 +663,8 @@ def generate_validation_semantic_ids(
 
             category_ids = (batch["category_id"][position_tensor].to(device=device, dtype=torch.long, non_blocking=True, ))
 
-            selected_event_ids = [batch_event_ids[position]  for position in inference_positions]
 
-
-            fixed_c2_ids = (torch.tensor([validation_event_to_c2[event_id]  for event_id in selected_event_ids], dtype=torch.long, device=device, ))
+            fixed_c2_ids = (torch.tensor([validation_article_to_c2[batch_article_ids[position]] for position in inference_positions], dtype=torch.long, device=device, ))
 
             output = (model.get_semantic_ids(x=x, category_ids=(category_ids), fixed_c2_ids=(fixed_c2_ids), ))
 
@@ -786,38 +715,15 @@ def generate_validation_semantic_ids(
         raise RuntimeError("Number of generated " "Validation Semantic IDs " "does not match " "number of articles.")
 
 
-    validation_only_result = (result[~result["article_id"].isin(train_article_lookup.keys())].copy())
-
-    if (len(validation_only_result) > 0):
-
-        event_c2_counts = (validation_only_result.groupby("event_id")["c2"].nunique())
-
-        inconsistent_events = (event_c2_counts[event_c2_counts > 1])
-
-        if (len(inconsistent_events) > 0):
-            raise RuntimeError(
-                "Validation event-level "
-                "C2 assignment failed. "
-                f"{len(inconsistent_events)} "
-                "events received "
-                "multiple C2 codes."
-            )
-
     print("\nValidation SID generation " "complete.")
 
     print("Reused Train articles     : " f"{reused_train_articles}")
 
     print("New articles inferred     : " f"{inferred_validation_articles}")
 
-    inherited_event_count = int((validation_event_mapping["source"] == "inherited_train_event").sum())
+    print("Validation-only articles matched:", len(validation_article_mapping))
 
-    new_event_count = int((validation_event_mapping["source"] == "matched_train_event").sum())
-
-    print("Existing Train events     : " f"{inherited_event_count}")
-
-    print("New events matched to Train : " f"{new_event_count}")
-
-    return (result, validation_event_mapping, )
+    return (result, validation_article_mapping, )
 
 
 def assign_disambiguation_c4(train_result: pd.DataFrame, validation_result: pd.DataFrame, ):
@@ -1064,7 +970,7 @@ def generate_semantic_ids(
     train_event_mapping.to_parquet(train_event_mapping_path, index=False, )
 
 
-    (validation_result, validation_event_mapping, ) = (
+    (validation_result, validation_article_mapping, ) = (
         generate_validation_semantic_ids(
             model=model,
             master_path=str(validation_master_path),
@@ -1080,9 +986,9 @@ def generate_semantic_ids(
         )
     )
 
-    validation_event_mapping_path = (output_dir / "validation_event_c2_mapping.parquet")
+    validation_article_mapping_path = (output_dir / "validation_article_train_event_mapping.parquet")
 
-    validation_event_mapping.to_parquet(validation_event_mapping_path, index=False, )
+    validation_article_mapping.to_parquet(validation_article_mapping_path, index=False, )
 
 
     (train_result, validation_result, all_result, ) = assign_disambiguation_c4(train_result=(train_result), validation_result=(validation_result), )
@@ -1124,7 +1030,7 @@ def generate_semantic_ids(
 
     print("\nTrain Event C2 mapping:" f"\n  {train_event_mapping_path}")
 
-    print("\nValidation Event C2 mapping:" f"\n  {validation_event_mapping_path}")
+    print("\nValidation article-to-Train event mapping:" f"\n  {validation_article_mapping_path}")
 
     print("\nTrain SID file:" f"\n  {train_output_path}")
 
@@ -1144,7 +1050,7 @@ def generate_semantic_ids(
 
     print("=" * 70)
 
-    return (train_result, validation_result, all_result, train_event_mapping, validation_event_mapping, )
+    return (train_result, validation_result, all_result, train_event_mapping, validation_article_mapping, )
 
 
 if __name__ == "__main__":
@@ -1183,4 +1089,4 @@ if __name__ == "__main__":
         batch_size=(args.batch_size),
         num_workers=(args.num_workers),
         event_time_window_days=(args.event_time_window_days if args.event_time_window_days >= 0 else None),
-    )
+    ) 
