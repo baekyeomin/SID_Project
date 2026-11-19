@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,34 @@ def _to_float_list(value: Any) -> List[float]:
         float(v)
         for v in _to_list(value)
     ]
+
+
+def validate_sid_vocab_range(sids: torch.Tensor, levels: tuple[str, ...], row_idx: int, source: str) -> None:
+    # Gin에 주입된 Vocabulary 크기와 실제 SID 값 비교
+    if sids.numel() == 0:
+        return
+
+    for col_idx, level in enumerate(levels):
+        parameter = f"NewsEncoderDecoderTransformer.{level}_vocab_size"
+
+        try:
+            vocab_size = int(gin.query_parameter(parameter))
+        except ValueError as e:
+            raise ValueError(f"Missing Gin vocabulary setting: {parameter}") from e
+
+        if vocab_size <= 0:
+            raise ValueError(f"Invalid vocabulary size: {parameter}={vocab_size}")
+
+        invalid_mask = sids[:, col_idx] >= vocab_size
+
+        if invalid_mask.any():
+            invalid_value = int(sids[:, col_idx][invalid_mask][0].item())
+            raise ValueError(
+                f"SID vocabulary range exceeded at parquet row {row_idx}: "
+                f"{source} {level}={invalid_value}, "
+                f"allowed range=0~{vocab_size - 1}"
+            )
+
 
 # Dataset
 @gin.configurable
@@ -333,6 +362,10 @@ class NewsSequenceDataset(Dataset):
                     f"Negative SID found in candidate "
                     f"at parquet row {row_idx}."
                 )
+
+            # Gin Vocabulary 범위 검증 (추가)
+            validate_sid_vocab_range(history_sids, ("c1", "c2", "c3", "c4"), row_idx, "history")
+            validate_sid_vocab_range(candidate_sids, ("c1", "c2", "c3"), row_idx, "candidate")
 
         # 5. Optional metadata
         impression_id = (

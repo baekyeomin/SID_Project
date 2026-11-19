@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import argparse
@@ -39,12 +40,31 @@ def normalize_article_id(article_id):
     return str(article_id)
 
 
-def load_checkpoint(checkpoint_path: Path, model: NewsEncoderDecoderTransformer, device: torch.device) -> dict:
+def inject_checkpoint_vocab_sizes(checkpoint: dict) -> None:
+    # 학습된 embedding 크기에서 c1~c4 Vocabulary 크기 복원
+    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
+        raise ValueError("Checkpoint must contain model_state_dict for automatic vocabulary configuration.")
+
+    state_dict = checkpoint["model_state_dict"]
+
+    for level in ("c1", "c2", "c3", "c4"):
+        key = f"{level}_embedding.weight"
+
+        if key not in state_dict:
+            raise KeyError(f"Missing checkpoint parameter: {key}")
+
+        vocab_size = int(state_dict[key].shape[0])
+        gin.bind_parameter(f"NewsEncoderDecoderTransformer.{level}_vocab_size", vocab_size)
+        print(f"{level} vocab size: {vocab_size}")
+
+
+def load_checkpoint(checkpoint_path: Path, model: NewsEncoderDecoderTransformer, device: torch.device, checkpoint: dict | None = None) -> dict:
     # 저장된 Transformer checkpoint 불러오기
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found:\n{checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    if checkpoint is None:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
 
     # train_transformer.py에서 저장한 checkpoint 형식
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
@@ -254,6 +274,10 @@ def main() -> None:
     # Device
     device = get_device()
 
+    # Checkpoint Vocabulary 자동 복원
+    checkpoint_data = torch.load(checkpoint_path, map_location=device)
+    inject_checkpoint_vocab_sizes(checkpoint_data)
+
     print()
     print("Candidate Ranking Evaluation")
     print("Device:", device)
@@ -282,7 +306,7 @@ def main() -> None:
     model = NewsEncoderDecoderTransformer().to(device)
 
     # Checkpoint
-    checkpoint = load_checkpoint(checkpoint_path=checkpoint_path, model=model, device=device)
+    checkpoint = load_checkpoint(checkpoint_path=checkpoint_path, model=model, device=device, checkpoint=checkpoint_data)
     print("Checkpoint loaded.")
 
     if isinstance(checkpoint, dict) and "epoch" in checkpoint:

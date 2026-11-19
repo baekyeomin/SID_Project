@@ -1,15 +1,11 @@
+
 # Dataset
 NewsSequenceDataset.max_history_length = 20
 NewsSequenceDataset.drop_empty_history = True
 NewsSequenceDataset.validate_data = True
 
 # Semantic ID vocabulary size
-# c4는 주신 파일의 최대 c4 값 +1
-NewsEncoderDecoderTransformer.c1_vocab_size = 25
-NewsEncoderDecoderTransformer.c2_vocab_size = 128
-NewsEncoderDecoderTransformer.c3_vocab_size = 512
-NewsEncoderDecoderTransformer.c4_vocab_size = 28
-
+# c1~c4 크기는 train_transformer.py에서 SID 파일을 읽어 자동 설정
 
 # Transformer architecture --------------------
 # Transformer 내부 embedding 및 hidden representation 차원
@@ -37,8 +33,9 @@ TransformerLoss.lambda_preference = 1.0
 
 
 # Dataset paths --------------------------
-train.train_path = "/home/ubuntu/shared/datasets/ebnerd/train_sequences_1pos4neg.parquet"
-train.validation_path = "/home/ubuntu/shared/datasets/ebnerd/validation_sequences_1pos4neg_half.parquet"
+train.train_path = "datasets/ebnerd/train_sequences_1pos4neg.parquet"
+train.validation_path = "datasets/ebnerd/validation_sequences_1pos4neg_half.parquet"
+train.save_dir = "out/transformer/ebnerd"
 
 # 모델 checkpoint 저장 위치
 train.save_dir = "out/ebnerd"

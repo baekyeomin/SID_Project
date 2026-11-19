@@ -7,6 +7,7 @@ from typing import Dict, Optional
 
 import gin
 import numpy as np
+import pandas as pd
 import torch
 
 from torch.optim import AdamW
@@ -568,6 +569,46 @@ def train(
     )
 
 
+
+def inject_sid_vocab_sizes(sid_path: Path) -> None:
+    if not sid_path.exists():
+        raise FileNotFoundError(f"SID file not found: {sid_path}")
+
+    levels = ("c1", "c2", "c3", "c4")
+    sid_df = pd.read_parquet(sid_path, columns=list(levels))
+    if sid_df.empty:
+        raise ValueError(f"SID file is empty: {sid_path}")
+
+    print("SID path:", sid_path)
+    for level in levels:
+        values = pd.to_numeric(sid_df[level], errors="raise")
+        if values.isna().any() or (values < 0).any() or (values % 1 != 0).any():
+            raise ValueError(f"Invalid {level} values in SID file: {sid_path}")
+        size = int(values.max()) + 1
+        gin.bind_parameter(f"NewsEncoderDecoderTransformer.{level}_vocab_size", size)
+        print(f"{level} vocab size: {size} (max={size - 1})")
+
+
+def resolve_sid_path(sid_path: Optional[str]) -> Path:
+    if sid_path is not None:
+        return resolve_path(sid_path)
+
+    train_path = resolve_path(gin.query_parameter("train.train_path"))
+    dataset_name = train_path.parent.name
+    candidates = [
+        train_path.parent / "article_semantic_ids.parquet",
+        BASE_DIR / "datasets" / dataset_name / "article_semantic_ids.parquet",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "article_semantic_ids.parquet not found. Checked: "
+        + ", ".join(str(path) for path in candidates)
+        + ". Specify --sid-path to select the SID file."
+    )
+
+
 def main() -> None:
     # --config으로 gin 파일을 받아 학습 시작
     parser = argparse.ArgumentParser(
@@ -581,6 +622,8 @@ def main() -> None:
         type=str,
         required=True,
     )
+
+    parser.add_argument("--sid-path", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -601,6 +644,8 @@ def main() -> None:
     gin.parse_config_file(
         str(config_path)
     )
+
+    inject_sid_vocab_sizes(resolve_sid_path(args.sid_path))
 
     train()
 
