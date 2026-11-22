@@ -1171,27 +1171,21 @@ def match_validation_articles_to_train(
         )
 
         before = len(entity_sets[best])
+        new_tokens = set()
 
-        new_tokens = (
-            article_entities
-            - entity_sets[best]
-        )
+        # Jaccard 유사도가 0.3 이상일 때만 개체 집합 갱신
+        if method == "tfidf_jaccard_72h":
+            new_tokens = article_entities - entity_sets[best]
 
-        # TIMEUPDATE: 개체 집합 갱신
-        if new_tokens:
-            entity_sets[best].update(
-                new_tokens
-            )
+            if new_tokens:
+                entity_sets[best].update(new_tokens)
 
-            for token in new_tokens:
-                inverted[token].add(best)
-                weight_sums[best] += weight(token)
+                for token in new_tokens:
+                    inverted[token].add(best)
+                    weight_sums[best] += weight(token)
 
-        # TIMEUPDATE: 마지막 발행 시각 갱신
-        if (
-            pd.isna(prev_last)
-            or timestamp > prev_last
-        ):
+        # 유사도와 관계없이 마지막 발행 시각 갱신
+        if pd.isna(prev_last) or timestamp > prev_last:
             last_times = last_times.where(
                 np.arange(n) != best,
                 timestamp,
