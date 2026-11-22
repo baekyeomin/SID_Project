@@ -763,7 +763,7 @@ def train(
     # Checkpoint
     # --------------------------------------------------------
     pretrained_rqvae_path=None,
-    save_dir_root: str = "out/rqvae/ebnerd",
+    save_dir_root: str = "out/rqvae/ebnerd_h",
     save_model_every_epochs: int = 50,
 
     # --------------------------------------------------------
