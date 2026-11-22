@@ -21,7 +21,7 @@ generate_semantic_ids(
     batch_size=512,
 )
 ```
-
+    
 ---
 
 ## 2. MIND — H 버전
