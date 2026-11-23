@@ -1,4 +1,11 @@
 
+# 수정사항 (2026-11-23)
+# - article_entities.parquet의 canonical_entity_key 사용 (별도 정규화 없음)
+# - entity_idf.parquet의 is_high_df=True 개체를 Train/Validation 매칭에서 제외
+# - 기존 IDF를 그대로 사용하며 미등록 개체는 unseen_entity_idf 적용
+# - 개체가 없는 기사는 빈 집합으로 처리
+# - 기존 72시간 매칭, 코사인 fallback, TimeUpdate, SID 부여 방식 유지
+
 # Train 사건 구성
 # - 이전: event_id로 그룹화
 # - 변경: 유지
@@ -33,14 +40,9 @@
 # - 이전: 기존 SID 재사용
 # - 변경: 유지
 
-
 import argparse
-import ast
 import importlib
 import json
-import math
-import re
-import unicodedata
 import warnings
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -63,117 +65,61 @@ def event_key(value):
     return str(value)
 
 
-def parse_entities(value):
-    if value is None:
-        return set()
-
-    if isinstance(value, (list, tuple, set, np.ndarray)):
-        items = value
-    elif isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return set()
-
-        if raw.startswith(("[", "(", "{")):
-            try:
-                parsed = json.loads(raw)
-            except (ValueError, TypeError):
-                try:
-                    parsed = ast.literal_eval(raw)
-                except (SyntaxError, ValueError):
-                    parsed = None
-
-            if isinstance(parsed, dict):
-                items = parsed.keys()
-            elif isinstance(parsed, (list, tuple, set)):
-                items = parsed
-            else:
-                raise ValueError(f"Cannot parse entities: {raw[:120]}")
-        else:
-            items = re.split(r"\s*[|;,]\s*", raw)
-    else:
-        try:
-            if pd.isna(value):
-                return set()
-        except (TypeError, ValueError):
-            pass
-        raise TypeError(
-            f"Unsupported entities type: {type(value).__name__}"
-        )
-
-    result = set()
-    for entity in items:
-        if entity is None:
-            continue
-
-        label = unicodedata.normalize(
-            "NFKC", str(entity)
-        ).strip().casefold()
-
-        if label and label not in {"nan", "none", "null"}:
-            result.add(label)
-
-    return result
-
-
-def load_event_entity_lookup(path):
+def load_article_entity_lookup(path, excluded_entities):
     path = Path(path)
     if not path.is_file():
-        raise FileNotFoundError(f"Event master not found: {path}")
+        raise FileNotFoundError(f"Article entities not found: {path}")
 
     frame = pd.read_parquet(path)
-    required = {"event_id", "event_entities"}
+    required = {"article_id", "canonical_entity_key"}
     missing = required - set(frame.columns)
-
     if missing:
-        raise ValueError(
-            f"{path.name} missing columns: {sorted(missing)}"
-        )
+        raise ValueError(f"{path.name} missing columns: {sorted(missing)}")
 
     lookup = defaultdict(set)
-    for event_id, entities in zip(
-        frame["event_id"], frame["event_entities"]
-    ):
-        lookup[event_key(event_id)].update(
-            parse_entities(entities)
-        )
-
-    return dict(lookup)
-
-
-# 변경: Validation 개체를 article_id 기준으로 직접 조회
-def load_article_entity_lookup(path):
-    path = Path(path)
-
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Article entities not found: {path}"
-        )
-
-    frame = pd.read_parquet(path)
-    required = {"article_id", "article_entities"}
-    missing = required - set(frame.columns)
-
-    if missing:
-        raise ValueError(
-            f"{path.name} missing columns: {sorted(missing)}"
-        )
-
-    lookup = defaultdict(set)
-
-    for article_id, entities in zip(
-        frame["article_id"], frame["article_entities"]
-    ):
+    for article_id, key in zip(frame["article_id"], frame["canonical_entity_key"]):
         if pd.isna(article_id):
-            raise ValueError(
-                "article_entities.parquet contains missing article_id"
-            )
-
-        lookup[str(article_id)].update(
-            parse_entities(entities)
-        )
-
+            raise ValueError("article_entities.parquet contains missing article_id")
+        if pd.isna(key):
+            continue
+        entity = str(key)
+        if entity and entity not in excluded_entities:
+            lookup[str(article_id)].add(entity)
     return dict(lookup)
+
+
+def load_entity_idf(idf_path, meta_path):
+    idf_path, meta_path = Path(idf_path), Path(meta_path)
+    if not idf_path.is_file():
+        raise FileNotFoundError(f"Entity IDF not found: {idf_path}")
+    if not meta_path.is_file():
+        raise FileNotFoundError(f"Entity IDF metadata not found: {meta_path}")
+
+    frame = pd.read_parquet(idf_path)
+    required = {"canonical_entity_key", "is_high_df", "idf"}
+    missing = required - set(frame.columns)
+    if missing:
+        raise ValueError(f"{idf_path.name} missing columns: {sorted(missing)}")
+    if frame["canonical_entity_key"].isna().any():
+        raise ValueError("entity_idf.parquet contains missing canonical_entity_key")
+    if frame["canonical_entity_key"].duplicated().any():
+        raise ValueError("entity_idf.parquet contains duplicate canonical_entity_key")
+    if frame["is_high_df"].isna().any() or frame["idf"].isna().any():
+        raise ValueError("entity_idf.parquet contains missing is_high_df or idf")
+
+    with meta_path.open("r", encoding="utf-8") as file:
+        metadata = json.load(file)
+    if "unseen_entity_idf" not in metadata:
+        raise ValueError("entity_idf_meta.json missing unseen_entity_idf")
+    unseen_idf = float(metadata["unseen_entity_idf"])
+    if not np.isfinite(unseen_idf):
+        raise ValueError("Invalid unseen_entity_idf")
+
+    excluded = set(frame.loc[frame["is_high_df"].astype(bool), "canonical_entity_key"].astype(str))
+    weights = dict(zip(frame["canonical_entity_key"].astype(str), frame["idf"].astype(float)))
+    if not all(np.isfinite(value) for value in weights.values()):
+        raise ValueError("entity_idf.parquet contains non-finite idf")
+    return excluded, weights, unseen_idf
 
 
 def ensure_torch_serialization_compatibility():
@@ -917,46 +863,31 @@ def match_validation_articles_to_train(
         1e-12,
     )
 
-    # Train 사건 개체는 기존 파일에서 조회
-    original_train_entities = load_event_entity_lookup(
-        _EVENT_CONTEXT["train_events"]
+    # Train 기준 고빈도 개체와 IDF를 불러와 두 split에 동일하게 적용
+    excluded_entities, idf_weights, unseen_idf = load_entity_idf(
+        _EVENT_CONTEXT["entity_idf"],
+        _EVENT_CONTEXT["entity_idf_meta"],
     )
-
-    # 변경: Validation 기사별 개체 직접 조회
     article_entity_lookup = load_article_entity_lookup(
-        _EVENT_CONTEXT["article_entities"]
+        _EVENT_CONTEXT["article_entities"], excluded_entities
     )
 
-    missing_train = (
-        set(keys) - set(original_train_entities)
-    )
-
-    if missing_train:
-        raise ValueError(
-            "Train events missing from event_master.parquet: "
-            f"{list(missing_train)[:5]}"
+    # Train 사건 개체도 정규화된 Train 기사 개체의 합집합으로 구성
+    train_event_entities = defaultdict(set)
+    for article_id, event_id in zip(
+        train_master["article_id"], train_master["event_id"]
+    ):
+        train_event_entities[event_key(event_id)].update(
+            article_entity_lookup.get(str(article_id), set())
         )
-
     entity_sets = [
-        set(original_train_entities[k])
+        set(train_event_entities.get(k, set()))
         for k in keys
     ]
 
-    # Train-only IDF 고정
-    df = Counter(
-        entity
-        for group in entity_sets
-        for entity in group
-    )
-
+    # 미등록 개체에는 전처리에서 정한 unseen_entity_idf 적용
     def weight(entity):
-        return (
-            math.log(
-                (1 + n)
-                / (1 + df.get(entity, 0))
-            )
-            + 1.0
-        )
+        return idf_weights.get(entity, unseen_idf)
 
     weight_sums = np.array(
         [
@@ -1046,16 +977,8 @@ def match_validation_articles_to_train(
         article_id = str(row["article_id"])
         timestamp = valid_times.iloc[positions[i]]
 
-        # 변경: Validation event_id를 사용하지 않음
-        if article_id not in article_entity_lookup:
-            raise ValueError(
-                "Article entities missing for "
-                f"article_id={article_id}"
-            )
-
-        article_entities = article_entity_lookup[
-            article_id
-        ]
+        # 개체 없는 기사는 정상적인 빈 집합으로 처리
+        article_entities = article_entity_lookup.get(article_id, set())
 
         cosines = (
             vectors @ article_vectors[i]
@@ -2009,6 +1932,8 @@ def generate_semantic_ids(
     event_time_window_days=3.0,
     train_event_master_path=None,
     article_entities_path=None,
+    entity_idf_path=None,
+    entity_idf_meta_path=None,
 ):
     global _EVENT_CONTEXT
 
@@ -2028,12 +1953,23 @@ def generate_semantic_ids(
         else data_dir / "article_entities.parquet"
     )
 
+    entity_idf_file = (
+        Path(entity_idf_path) if entity_idf_path
+        else data_dir / "entity_idf.parquet"
+    )
+    entity_idf_meta_file = (
+        Path(entity_idf_meta_path) if entity_idf_meta_path
+        else data_dir / "entity_idf_meta.json"
+    )
+
     previous_context = _EVENT_CONTEXT
 
     try:
         _EVENT_CONTEXT = {
             "train_events": train_events_path,
             "article_entities": article_entities_file,
+            "entity_idf": entity_idf_file,
+            "entity_idf_meta": entity_idf_meta_file,
         }
 
         result = _generate_semantic_ids_pipeline(
@@ -2154,6 +2090,9 @@ if __name__ == "__main__":
         default=None,
     )
 
+    parser.add_argument("--entity_idf_path", type=str, default=None)
+    parser.add_argument("--entity_idf_meta_path", type=str, default=None)
+
     args = parser.parse_args()
 
     generate_semantic_ids(
@@ -2169,4 +2108,6 @@ if __name__ == "__main__":
         ),
         train_event_master_path=args.train_event_master_path,
         article_entities_path=args.article_entities_path,
+        entity_idf_path=args.entity_idf_path,
+        entity_idf_meta_path=args.entity_idf_meta_path,
     )
