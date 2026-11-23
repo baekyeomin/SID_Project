@@ -198,6 +198,8 @@ def print_train_config(
     lambda_rec,
     lambda_cb,
     lambda_com,
+    lambda_uniq,
+    uniqueness_margin,
     gumbel_t0,
     gumbel_min_t,
     gumbel_anneal_rate,
@@ -205,6 +207,10 @@ def print_train_config(
     mixed_precision_type,
     do_eval,
     eval_every_epochs,
+    early_stopping,
+    early_stopping_min_epochs,
+    early_stopping_patience,
+    early_stopping_min_delta,
     save_model_every_epochs,
     save_dir_root,
     seed,
@@ -261,6 +267,8 @@ def print_train_config(
     print(f"lambda_rec                 : {lambda_rec}")
     print(f"lambda_cb                  : {lambda_cb}")
     print(f"lambda_com                 : {lambda_com}")
+    print(f"lambda_uniq                : {lambda_uniq}")
+    print(f"uniqueness_margin          : {uniqueness_margin}")
 
     print("\n[Runtime]")
     print(f"amp                        : {amp}")
@@ -273,6 +281,23 @@ def print_train_config(
         "eval_every_epochs          : "
         f"{eval_every_epochs}"
     )
+
+    print("\n[Early Stopping]")
+    print(f"early_stopping             : {early_stopping}")
+    print(
+        "early_stopping_min_epochs  : "
+        f"{early_stopping_min_epochs}"
+    )
+    print(
+        "early_stopping_patience    : "
+        f"{early_stopping_patience}"
+    )
+    print(
+        "early_stopping_min_delta   : "
+        f"{early_stopping_min_delta}"
+    )
+
+    print("\n[Checkpoint]")
     print(
         "save_model_every_epochs    : "
         f"{save_model_every_epochs}"
@@ -503,6 +528,7 @@ def evaluate(
     - reconstruction_loss
     - codebook_loss
     - commitment_loss
+    - uniqueness_loss
     - rqvae_loss
 
     batch 크기가 마지막에 달라질 수 있으므로
@@ -516,6 +542,7 @@ def evaluate(
         "reconstruction_loss": 0.0,
         "codebook_loss": 0.0,
         "commitment_loss": 0.0,
+        "uniqueness_loss": 0.0,
         "rqvae_loss": 0.0,
     }
 
@@ -575,6 +602,14 @@ def evaluate(
             * batch_size_now
         )
 
+        sums["uniqueness_loss"] += (
+            output.uniqueness_loss
+            .detach()
+            .float()
+            .item()
+            * batch_size_now
+        )
+
         sums["rqvae_loss"] += (
             output.rqvae_loss
             .detach()
@@ -616,6 +651,10 @@ def print_loss_result(
     print(
         "  commitment loss     : "
         f"{result['commitment_loss']:.6f}"
+    )
+    print(
+        "  uniqueness loss     : "
+        f"{result['uniqueness_loss']:.6f}"
     )
     print(
         "  rqvae loss          : "
@@ -660,6 +699,7 @@ def build_checkpoint_state(
     lambda_rec,
     lambda_cb,
     lambda_com,
+    lambda_uniq,
 ):
     unwrapped_model = accelerator.unwrap_model(
         model
@@ -681,6 +721,7 @@ def build_checkpoint_state(
             "lambda_rec": lambda_rec,
             "lambda_cb": lambda_cb,
             "lambda_com": lambda_com,
+            "lambda_uniq": lambda_uniq,
         },
         "gin_config": gin.operative_config_str(),
     }
@@ -731,6 +772,8 @@ def train(
     lambda_rec: float = 1.0,
     lambda_cb: float = 1.0,
     lambda_com: float = 0.25,
+    lambda_uniq: float = 0.1,
+    uniqueness_margin: float = 0.5,
 
     # --------------------------------------------------------
     # Q2 K-means initialization
@@ -760,10 +803,21 @@ def train(
     eval_every_epochs: int = 10,
 
     # --------------------------------------------------------
+    # Early stopping
+    # --------------------------------------------------------
+    # epochs는 최대 학습 epoch이고, 아래 조건을 만족할 때만 그 전에 종료한다.
+    # patience는 "epoch 수"가 아니라 "Validation 평가 횟수" 기준이다.
+    # 예) eval_every_epochs=10, patience=20이면 약 200 epoch 동안 개선을 기다린다.
+    early_stopping: bool = True,
+    early_stopping_min_epochs: int = 200,
+    early_stopping_patience: int = 20,
+    early_stopping_min_delta: float = 0.001,
+
+    # --------------------------------------------------------
     # Checkpoint
     # --------------------------------------------------------
     pretrained_rqvae_path=None,
-    save_dir_root: str = "out/rqvae/ebnerd_h",
+    save_dir_root: str = "out/rqvae/ebnerd",
     save_model_every_epochs: int = 50,
 
     # --------------------------------------------------------
@@ -790,6 +844,26 @@ def train(
     if eval_every_epochs <= 0:
         raise ValueError(
             "eval_every_epochs must be > 0."
+        )
+
+    if early_stopping and not do_eval:
+        raise ValueError(
+            "early_stopping=True requires do_eval=True."
+        )
+
+    if early_stopping_min_epochs < 0:
+        raise ValueError(
+            "early_stopping_min_epochs must be >= 0."
+        )
+
+    if early_stopping_patience <= 0:
+        raise ValueError(
+            "early_stopping_patience must be > 0."
+        )
+
+    if early_stopping_min_delta < 0:
+        raise ValueError(
+            "early_stopping_min_delta must be >= 0."
         )
 
     if save_model_every_epochs <= 0:
@@ -855,6 +929,8 @@ def train(
         lambda_rec=lambda_rec,
         lambda_cb=lambda_cb,
         lambda_com=lambda_com,
+        lambda_uniq=lambda_uniq,
+        uniqueness_margin=uniqueness_margin,
         gumbel_t0=gumbel_t0,
         gumbel_min_t=gumbel_min_t,
         gumbel_anneal_rate=(
@@ -867,6 +943,16 @@ def train(
         do_eval=do_eval,
         eval_every_epochs=(
             eval_every_epochs
+        ),
+        early_stopping=early_stopping,
+        early_stopping_min_epochs=(
+            early_stopping_min_epochs
+        ),
+        early_stopping_patience=(
+            early_stopping_patience
+        ),
+        early_stopping_min_delta=(
+            early_stopping_min_delta
         ),
         save_model_every_epochs=(
             save_model_every_epochs
@@ -1015,6 +1101,8 @@ def train(
         lambda_rec=lambda_rec,
         lambda_cb=lambda_cb,
         lambda_com=lambda_com,
+        lambda_uniq=lambda_uniq,
+        uniqueness_margin=uniqueness_margin,
     )
 
     model = model.to(device)
@@ -1193,6 +1281,16 @@ def train(
                 "gumbel_anneal_rate": (
                     gumbel_anneal_rate
                 ),
+                "early_stopping": early_stopping,
+                "early_stopping_min_epochs": (
+                    early_stopping_min_epochs
+                ),
+                "early_stopping_patience": (
+                    early_stopping_patience
+                ),
+                "early_stopping_min_delta": (
+                    early_stopping_min_delta
+                ),
                 "seed": seed,
             },
         )
@@ -1284,6 +1382,21 @@ def train(
         )
 
     # ========================================================
+    # Early stopping / Best checkpoint state
+    # ========================================================
+    # Best checkpoint 저장은 early_stopping ON/OFF와 무관하게 수행한다.
+    # 그래서 Total Loss 기준 최고 모델과 Reconstruction Loss 기준 최고 모델을
+    # 나중에 각각 Semantic ID로 만들어 비교할 수 있다.
+    best_valid_total_loss = float("inf")
+    best_valid_rec_loss = float("inf")
+    best_valid_total_epoch = None
+    best_valid_rec_epoch = None
+    early_stopping_counter = 0
+    early_stopped = False
+    stop_reason = None
+    last_completed_epoch = start_epoch - 1
+
+    # ========================================================
     # Epoch training loop
     # ========================================================
 
@@ -1304,6 +1417,7 @@ def train(
             "reconstruction_loss": 0.0,
             "codebook_loss": 0.0,
             "commitment_loss": 0.0,
+            "uniqueness_loss": 0.0,
             "rqvae_loss": 0.0,
         }
 
@@ -1443,6 +1557,17 @@ def train(
             )
 
             epoch_sums[
+                "uniqueness_loss"
+            ] += (
+                model_output
+                .uniqueness_loss
+                .detach()
+                .float()
+                .item()
+                * batch_size_now
+            )
+
+            epoch_sums[
                 "rqvae_loss"
             ] += (
                 model_output
@@ -1494,6 +1619,10 @@ def train(
             in epoch_sums.items()
         }
 
+        # Early Stopping이 걸리더라도 실제 마지막 완료 epoch를 final checkpoint에 기록한다.
+        last_completed_epoch = epoch
+        stop_training = False
+
         if accelerator.is_main_process:
             print(
                 f"[Epoch {epoch + 1:4d}/{epochs}] "
@@ -1504,6 +1633,8 @@ def train(
                 f"{epoch_result['codebook_loss']:.6f} | "
                 "com="
                 f"{epoch_result['commitment_loss']:.6f} | "
+                "uniq="
+                f"{epoch_result['uniqueness_loss']:.6f} | "
                 "rqvae="
                 f"{epoch_result['rqvae_loss']:.6f} | "
                 f"t={last_gumbel_t:.6f} | "
@@ -1536,6 +1667,11 @@ def train(
                 "train/commitment_loss": (
                     epoch_result[
                         "commitment_loss"
+                    ]
+                ),
+                "train/uniqueness_loss": (
+                    epoch_result[
+                        "uniqueness_loss"
                     ]
                 ),
                 "train/rqvae_loss": (
@@ -1611,6 +1747,8 @@ def train(
                     f"{eval_result['codebook_loss']:.6f} | "
                     "com="
                     f"{eval_result['commitment_loss']:.6f} | "
+                    "uniq="
+                    f"{eval_result['uniqueness_loss']:.6f} | "
                     "rqvae="
                     f"{eval_result['rqvae_loss']:.6f}"
                 )
@@ -1640,6 +1778,11 @@ def train(
                                     "commitment_loss"
                                 ]
                             ),
+                            "eval/uniqueness_loss": (
+                                eval_result[
+                                    "uniqueness_loss"
+                                ]
+                            ),
                             "eval/rqvae_loss": (
                                 eval_result[
                                     "rqvae_loss"
@@ -1647,6 +1790,137 @@ def train(
                             ),
                         }
                     )
+
+        # ----------------------------------------------------
+        # Best checkpoint + Early stopping 판단
+        # ----------------------------------------------------
+        # Total Loss와 Reconstruction Loss가 서로 다르게 움직일 수 있으므로,
+        # 둘 중 하나라도 min_delta 이상 좋아지면 "개선"으로 판단한다.
+        # 단, 두 기준의 best checkpoint는 각각 별도 파일로 저장한다.
+        if should_eval:
+            current_total_loss = float(eval_result["loss"])
+            current_rec_loss = float(eval_result["reconstruction_loss"])
+
+            improved_total = (
+                current_total_loss
+                < best_valid_total_loss - early_stopping_min_delta
+            )
+            improved_rec = (
+                current_rec_loss
+                < best_valid_rec_loss - early_stopping_min_delta
+            )
+
+            if improved_total:
+                best_valid_total_loss = current_total_loss
+                best_valid_total_epoch = epoch + 1
+
+            if improved_rec:
+                best_valid_rec_loss = current_rec_loss
+                best_valid_rec_epoch = epoch + 1
+
+            # 같은 epoch에서 두 지표가 모두 최고면 같은 모델 상태를 두 파일에 저장한다.
+            if accelerator.is_main_process and (improved_total or improved_rec):
+                best_state = build_checkpoint_state(
+                    accelerator=accelerator,
+                    model=model,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    global_step=global_step,
+                    lambda_uniq=lambda_uniq,
+                    lambda_rec=lambda_rec,
+                    lambda_cb=lambda_cb,
+                    lambda_com=lambda_com,
+                )
+
+                best_state["validation_state"] = {
+                    "valid_total_loss": current_total_loss,
+                    "valid_reconstruction_loss": current_rec_loss,
+                    "best_valid_total_loss": best_valid_total_loss,
+                    "best_valid_total_epoch": best_valid_total_epoch,
+                    "best_valid_rec_loss": best_valid_rec_loss,
+                    "best_valid_rec_epoch": best_valid_rec_epoch,
+                }
+
+                if improved_total:
+                    best_total_path = os.path.join(
+                        save_dir_root,
+                        "checkpoint_best_total.pt",
+                    )
+                    safe_torch_save(best_state, best_total_path)
+                    print(
+                        "[Best Checkpoint] Total Loss improved -> "
+                        f"{best_total_path}"
+                    )
+
+                if improved_rec:
+                    best_rec_path = os.path.join(
+                        save_dir_root,
+                        "checkpoint_best_rec.pt",
+                    )
+                    safe_torch_save(best_state, best_rec_path)
+                    print(
+                        "[Best Checkpoint] Reconstruction Loss improved -> "
+                        f"{best_rec_path}"
+                    )
+
+            # min_epochs 이전에는 학습 안정화 구간으로 보고 counter를 올리지 않는다.
+            if improved_total or improved_rec:
+                early_stopping_counter = 0
+            elif epoch + 1 >= early_stopping_min_epochs:
+                early_stopping_counter += 1
+
+            if accelerator.is_main_process:
+                print(
+                    "[EarlyStopping] "
+                    f"epoch={epoch + 1} | "
+                    f"improved_total={improved_total} | "
+                    f"improved_rec={improved_rec} | "
+                    f"counter={early_stopping_counter}/"
+                    f"{early_stopping_patience} | "
+                    f"best_total={best_valid_total_loss:.6f}"
+                    f"@{best_valid_total_epoch} | "
+                    f"best_rec={best_valid_rec_loss:.6f}"
+                    f"@{best_valid_rec_epoch}"
+                )
+
+            if (
+                early_stopping
+                and epoch + 1 >= early_stopping_min_epochs
+                and early_stopping_counter >= early_stopping_patience
+            ):
+                early_stopped = True
+                stop_reason = (
+                    "No meaningful improvement in both Validation Total Loss "
+                    "and Reconstruction Loss for "
+                    f"{early_stopping_patience} consecutive evaluations."
+                )
+                stop_training = True
+
+                if accelerator.is_main_process:
+                    print("\n" + "=" * 70)
+                    print("EARLY STOPPING TRIGGERED")
+                    print("=" * 70)
+                    print(f"Stopped epoch           : {epoch + 1}")
+                    print(
+                        "Best Valid Total Loss   : "
+                        f"{best_valid_total_loss:.6f} "
+                        f"@ epoch {best_valid_total_epoch}"
+                    )
+                    print(
+                        "Best Valid Rec Loss     : "
+                        f"{best_valid_rec_loss:.6f} "
+                        f"@ epoch {best_valid_rec_epoch}"
+                    )
+                    print(
+                        "Patience                : "
+                        f"{early_stopping_patience}"
+                    )
+                    print(
+                        "Min delta               : "
+                        f"{early_stopping_min_delta}"
+                    )
+                    print(f"Reason                  : {stop_reason}")
+                    print("=" * 70 + "\n")
 
         # ----------------------------------------------------
         # Checkpoint save by epoch
@@ -1671,6 +1945,7 @@ def train(
                     lambda_rec=lambda_rec,
                     lambda_cb=lambda_cb,
                     lambda_com=lambda_com,
+                    lambda_uniq=lambda_uniq,
                 )
 
                 checkpoint_path = os.path.join(
@@ -1690,6 +1965,11 @@ def train(
                     "Saved checkpoint: "
                     f"{checkpoint_path}"
                 )
+
+        # Best checkpoint와 주기 checkpoint 저장이 끝난 뒤 실제 epoch loop를 종료한다.
+        if stop_training:
+            accelerator.wait_for_everyone()
+            break
 
     # ========================================================
     # AFTER TRAINING LOSS
@@ -1747,6 +2027,10 @@ def train(
                 "commitment_loss",
                 "commitment",
             ),
+            (
+                "uniqueness_loss",
+                "uniqueness",
+            ),
             ("rqvae_loss", "rqvae"),
         ]:
             before = initial_train_result[key]
@@ -1777,6 +2061,10 @@ def train(
                     "commitment_loss",
                     "commitment",
                 ),
+                (
+                    "uniqueness_loss",
+                    "uniqueness",
+                ),
                 ("rqvae_loss", "rqvae"),
             ]:
                 before = initial_eval_result[key]
@@ -1799,11 +2087,8 @@ def train(
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
-        final_epoch_index = (
-            epochs - 1
-            if epochs > 0
-            else -1
-        )
+        # Early Stopping이 걸렸다면 epochs-1이 아니라 실제 마지막 완료 epoch를 기록한다.
+        final_epoch_index = last_completed_epoch
 
         final_state = build_checkpoint_state(
             accelerator=accelerator,
@@ -1814,6 +2099,7 @@ def train(
             lambda_rec=lambda_rec,
             lambda_cb=lambda_cb,
             lambda_com=lambda_com,
+            lambda_uniq=lambda_uniq,
         )
 
         final_path = os.path.join(
@@ -1821,21 +2107,46 @@ def train(
             "checkpoint_final.pt",
         )
 
-        safe_torch_save(
-            final_state,
-            final_path,
+        final_state["early_stopping_state"] = {
+            "enabled": early_stopping,
+            "early_stopped": early_stopped,
+            "stopped_epoch": (
+                final_epoch_index + 1
+                if final_epoch_index >= 0
+                else 0
+            ),
+            "counter": early_stopping_counter,
+            "patience": early_stopping_patience,
+            "min_epochs": early_stopping_min_epochs,
+            "min_delta": early_stopping_min_delta,
+            "best_valid_total_loss": (
+                None
+                if best_valid_total_epoch is None
+                else best_valid_total_loss
+            ),
+            "best_valid_total_epoch": best_valid_total_epoch,
+            "best_valid_rec_loss": (
+                None
+                if best_valid_rec_epoch is None
+                else best_valid_rec_loss
+            ),
+            "best_valid_rec_epoch": best_valid_rec_epoch,
+            "stop_reason": stop_reason,
+        }
+
+        safe_torch_save(final_state, final_path)
+
+        actual_final_epoch = (
+            final_epoch_index + 1
+            if final_epoch_index >= 0
+            else 0
         )
 
         print("\n" + "=" * 70)
-        print(
-            "Final model saved: "
-            f"{final_path}"
-        )
-        print(f"Final epoch: {epochs}")
-        print(
-            "Final global_step: "
-            f"{global_step}"
-        )
+        print(f"Final model saved: {final_path}")
+        print(f"Final epoch: {actual_final_epoch}")
+        print(f"Early stopped: {early_stopped}")
+        print(f"Final global_step: {global_step}")
         print("=" * 70)
 
     if (

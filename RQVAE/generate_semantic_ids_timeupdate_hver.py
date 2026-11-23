@@ -96,14 +96,14 @@ def load_entity_idf(idf_path, meta_path):
         raise FileNotFoundError(f"Entity IDF metadata not found: {meta_path}")
 
     frame = pd.read_parquet(idf_path)
-    required = {"canonical_entity_key", "is_high_df", "idf"}
+    required = {"entity", "is_high_df", "idf"}
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"{idf_path.name} missing columns: {sorted(missing)}")
-    if frame["canonical_entity_key"].isna().any():
-        raise ValueError("entity_idf.parquet contains missing canonical_entity_key")
-    if frame["canonical_entity_key"].duplicated().any():
-        raise ValueError("entity_idf.parquet contains duplicate canonical_entity_key")
+    if frame["entity"].isna().any():
+        raise ValueError("entity_idf.parquet contains missing entity")
+    if frame["entity"].duplicated().any():
+        raise ValueError("entity_idf.parquet contains duplicate entity")
     if frame["is_high_df"].isna().any() or frame["idf"].isna().any():
         raise ValueError("entity_idf.parquet contains missing is_high_df or idf")
 
@@ -115,8 +115,8 @@ def load_entity_idf(idf_path, meta_path):
     if not np.isfinite(unseen_idf):
         raise ValueError("Invalid unseen_entity_idf")
 
-    excluded = set(frame.loc[frame["is_high_df"].astype(bool), "canonical_entity_key"].astype(str))
-    weights = dict(zip(frame["canonical_entity_key"].astype(str), frame["idf"].astype(float)))
+    excluded = set(frame.loc[frame["is_high_df"].astype(bool), "entity"].astype(str))
+    weights = dict(zip(frame["entity"].astype(str), frame["idf"].astype(float)))
     if not all(np.isfinite(value) for value in weights.values()):
         raise ValueError("entity_idf.parquet contains non-finite idf")
     return excluded, weights, unseen_idf
@@ -960,7 +960,7 @@ def match_validation_articles_to_train(
         range(len(positions)),
         key=lambda i: (
             valid_times.iloc[positions[i]],
-            str(
+            int(
                 valid_master.iloc[
                     positions[i]
                 ]["article_id"]
@@ -2050,7 +2050,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         type=str,
-        required=True,
+        default="out/rqvae/ebnerd_hver/checkpoint_best_rec.pt",
     )
 
     parser.add_argument(

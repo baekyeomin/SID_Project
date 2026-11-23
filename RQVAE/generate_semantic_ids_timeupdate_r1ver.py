@@ -37,6 +37,7 @@ def compute_event_c2_from_mean_r1(
     )
 
     event_sums = {}
+    event_h_sums = {}
     event_counts = {}
 
     print(
@@ -76,16 +77,20 @@ def compute_event_c2_from_mean_r1(
             x=x,
             category_ids=category_ids,
         )
+        h = model.encode(x)
 
         for local_index, position in enumerate(positions):
             event_id = event_ids[position]
             vector = r1[local_index].detach().float().cpu()
+            h_vector = h[local_index].detach().float().cpu()
 
             if event_id not in event_sums:
                 event_sums[event_id] = vector.clone()
+                event_h_sums[event_id] = h_vector.clone()
                 event_counts[event_id] = 1
             else:
                 event_sums[event_id].add_(vector)
+                event_h_sums[event_id].add_(h_vector)
                 event_counts[event_id] += 1
 
         if (batch_index + 1) % 20 == 0:
@@ -129,13 +134,10 @@ def compute_event_c2_from_mean_r1(
         )
 
         if return_representations:
-            for event_id, vector in zip(
-                selected_ids, z_events
-            ):
+            for event_id in selected_ids:
                 representations[event_id] = (
-                    vector.detach()
-                    .float()
-                    .cpu()
+                    event_h_sums[event_id]
+                    .div(float(event_counts[event_id]))
                     .numpy()
                     .copy()
                 )
@@ -175,70 +177,10 @@ def compute_event_c2_from_mean_r1(
     )
 
 
-@torch.inference_mode()
-def encode_selected_articles_r1(
-    model,
-    dataset,
-    positions,
-    device,
-    batch_size=512,
-):
-    vectors = []
-    dtype = next(model.encoder.parameters()).dtype
-
-    for start in range(
-        0, len(positions), batch_size
-    ):
-        chunk = dataset.master.iloc[
-            positions[start:start + batch_size]
-        ]
-
-        rows = (
-            chunk["embedding_row"]
-            .astype(int)
-            .to_numpy()
-        )
-
-        x = torch.from_numpy(
-            np.asarray(
-                dataset.embeddings[rows],
-                dtype=np.float32,
-            ).copy()
-        ).to(
-            device=device,
-            dtype=dtype,
-        )
-
-        category_ids = torch.tensor(
-            chunk["model_category_id"]
-            .astype(int)
-            .to_numpy(),
-            device=device,
-            dtype=torch.long,
-        )
-
-        r1 = model.get_c2_residual(
-            x=x,
-            category_ids=category_ids,
-        )
-
-        vectors.append(
-            r1.detach().float().cpu().numpy()
-        )
-
-    return (
-        np.concatenate(vectors, axis=0)
-        if vectors
-        else np.empty(
-            (0, model.embed_dim),
-            dtype=np.float32,
-        )
-    )
-
 
 def generate_semantic_ids(
     data_dir,
-    checkpoint_path="out/rqvae/ebnerd_r1/checkpoint_final.pt",
+    checkpoint_path="out/rqvae/ebnerd_r1/checkpoint_best_rec.pt",
     output_dir="out/semantic_ids/ebnerd_r1",
     batch_size=512,
     num_workers=0,
@@ -249,7 +191,6 @@ def generate_semantic_ids(
     entity_idf_meta_path=None,
 ):
     original_c2 = hver.compute_event_c2_from_mean_h
-    original_encoder = hver.encode_selected_articles
 
     try:
         # Train 사건 대표와 C2 결정: mean(r1(a))
@@ -257,10 +198,7 @@ def generate_semantic_ids(
             compute_event_c2_from_mean_r1
         )
 
-        # Validation 코사인 Fallback: r1(article)
-        hver.encode_selected_articles = (
-            encode_selected_articles_r1
-        )
+        # Validation 코사인 Fallback: hver.encode_selected_articles의 h 사용
 
         # H 버전의 정규화 개체, 고빈도 제외, IDF 및 TimeUpdate 로직 재사용
         return hver.generate_semantic_ids(
@@ -278,7 +216,6 @@ def generate_semantic_ids(
 
     finally:
         hver.compute_event_c2_from_mean_h = original_c2
-        hver.encode_selected_articles = original_encoder
 
 
 if __name__ == "__main__":
@@ -290,7 +227,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--checkpoint",
-        default="out/rqvae/ebnerd_r1/checkpoint_final.pt",
+        default="out/rqvae/ebnerd_r1/checkpoint_best_rec.pt",
     )
     parser.add_argument(
         "--output_dir",

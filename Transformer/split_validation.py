@@ -1,31 +1,19 @@
+import argparse
 from pathlib import Path
 
 import pandas as pd
 
-
-# 현재 파일 위치 기준 Transformer/
 BASE_DIR = Path(__file__).resolve().parent
-
-input_path = (
-    BASE_DIR
-    / "datasets"
-    / "ebnerd"
-    / "validation_sequences_1pos4neg.parquet"
-)
-
-validation_output_path = (
-    BASE_DIR
-    / "datasets"
-    / "ebnerd"
-    / "validation_sequences_1pos4neg_half.parquet"
-)
-
-test_output_path = (
-    BASE_DIR
-    / "datasets"
-    / "ebnerd"
-    / "test_sequences_1pos4neg.parquet"
-)
+parser = argparse.ArgumentParser()
+parser.add_argument("--input_dir", type=Path, default=BASE_DIR / "datasets" / "ebnerd")
+parser.add_argument("--output_dir", type=Path, default=None)
+args = parser.parse_args()
+input_dir = args.input_dir
+output_dir = args.output_dir if args.output_dir is not None else input_dir
+output_dir.mkdir(parents=True, exist_ok=True)
+input_path = input_dir / "validation_sequences_1pos4neg.parquet"
+validation_output_path = output_dir / "validation_sequences_1pos4neg_half.parquet"
+test_output_path = output_dir / "test_sequences_1pos4neg.parquet"
 
 
 # 기존 validation 불러오기

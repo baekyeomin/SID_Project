@@ -8,7 +8,7 @@ from torch import nn
 from torch import Tensor
 
 from modules.encoder import MLP
-from modules.loss import ReconstructionLoss, RqVaeLoss
+from modules.loss import ReconstructionLoss, RqVaeLoss, UniquenessLoss
 from modules.quantize import Quantize, QuantizeForwardMode
 
 
@@ -36,6 +36,7 @@ class RqVaeComputedLosses(NamedTuple):
     reconstruction_loss: Tensor
     codebook_loss: Tensor
     commitment_loss: Tensor
+    uniqueness_loss: Tensor
     rqvae_loss: Tensor
     embs_norm: Tensor
     p_unique_ids: Tensor
@@ -64,6 +65,8 @@ class RqVae(
         lambda_rec: float = 1.0,
         lambda_cb: float = 1.0,
         lambda_com: float = 0.25,
+        lambda_uniq: float = 0.1,
+        uniqueness_margin: float = 0.5,
     ) -> None:
 
         super().__init__()
@@ -92,6 +95,8 @@ class RqVae(
             "lambda_rec": lambda_rec,
             "lambda_cb": lambda_cb,
             "lambda_com": lambda_com,
+            "lambda_uniq": lambda_uniq,
+            "uniqueness_margin": uniqueness_margin,
         }
 
         # ----------------------------------------------------
@@ -181,10 +186,15 @@ class RqVae(
 
         self.reconstruction_loss_fn = ReconstructionLoss()
 
+        self.uniqueness_loss_fn = UniquenessLoss(
+            margin=uniqueness_margin,
+        )
+
         self.loss_fn = RqVaeLoss(
             lambda_rec=lambda_rec,
             lambda_cb=lambda_cb,
             lambda_com=lambda_com,
+            lambda_uniq=lambda_uniq,
         )
 
 
@@ -583,11 +593,32 @@ class RqVae(
         )
 
         # ----------------------------------------------------
+        # Uniqueness Loss (HiD-VAE DUL)
+        #
+        # quantization 이전 latent h(a)는
+        # residuals[..., 0]에 이미 저장되어 있음
+        # (Q1 input = h)
+        # ----------------------------------------------------
+
+        h_pre_quantization = (
+            quantized
+            .residuals[..., 0]
+        )
+
+        uniqueness_loss = (
+            self.uniqueness_loss_fn(
+                z0=h_pre_quantization,
+                sem_ids=quantized.sem_ids,
+            )
+        )
+
+        # ----------------------------------------------------
         # Total Loss
         #
         # λ_rec * reconstruction
         # + λ_cb * codebook
         # + λ_com * commitment
+        # + λ_uniq * uniqueness
         # ----------------------------------------------------
 
         total_loss_per_sample = (
@@ -600,6 +631,9 @@ class RqVae(
                 ),
                 commitment_loss=(
                     commitment_loss
+                ),
+                uniqueness_loss=(
+                    uniqueness_loss
                 ),
             )
         )
@@ -677,6 +711,9 @@ class RqVae(
             ),
             commitment_loss=(
                 commitment_loss.mean()
+            ),
+            uniqueness_loss=(
+                uniqueness_loss
             ),
             rqvae_loss=(
                 rqvae_loss_per_sample.mean()
