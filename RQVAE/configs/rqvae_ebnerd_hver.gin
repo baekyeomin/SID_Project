@@ -41,7 +41,7 @@ train.eval_every_epochs = 10
 
 # Checkpoint
 train.pretrained_rqvae_path = None
-train.save_dir_root = "out/rqvae/ebnerd/"
+train.save_dir_root = "out/rqvae/ebnerd_h/"
 train.save_model_every_epochs = 50
 
 # Logging
