@@ -1,3 +1,9 @@
+
+# 수정사항 (2026-11-23)
+# - H 버전의 정규화된 canonical_entity_key 및 is_high_df 제외 로직 재사용
+# - Train 기준 IDF 및 unseen_entity_idf 사용을 위한 파일 경로 인자 추가
+# - 기존 R1 기반 C2 결정, 코사인 Fallback, TimeUpdate 로직 유지
+
 import argparse
 
 import numpy as np
@@ -239,6 +245,8 @@ def generate_semantic_ids(
     event_time_window_days=3.0,
     train_event_master_path=None,
     article_entities_path=None,
+    entity_idf_path=None,
+    entity_idf_meta_path=None,
 ):
     original_c2 = hver.compute_event_c2_from_mean_h
     original_encoder = hver.encode_selected_articles
@@ -254,7 +262,7 @@ def generate_semantic_ids(
             encode_selected_articles_r1
         )
 
-        # H 버전의 Jaccard 및 TIMEUPDATE 로직 재사용
+        # H 버전의 정규화 개체, 고빈도 제외, IDF 및 TimeUpdate 로직 재사용
         return hver.generate_semantic_ids(
             data_dir=data_dir,
             checkpoint_path=checkpoint_path,
@@ -264,6 +272,8 @@ def generate_semantic_ids(
             event_time_window_days=event_time_window_days,
             train_event_master_path=train_event_master_path,
             article_entities_path=article_entities_path,
+            entity_idf_path=entity_idf_path,
+            entity_idf_meta_path=entity_idf_meta_path,
         )
 
     finally:
@@ -309,6 +319,14 @@ if __name__ == "__main__":
         "--article_entities_path",
         default=None,
     )
+    parser.add_argument(
+        "--entity_idf_path",
+        default=None,
+    )
+    parser.add_argument(
+        "--entity_idf_meta_path",
+        default=None,
+    )
 
     args = parser.parse_args()
 
@@ -325,4 +343,6 @@ if __name__ == "__main__":
         ),
         train_event_master_path=args.train_event_master_path,
         article_entities_path=args.article_entities_path,
+        entity_idf_path=args.entity_idf_path,
+        entity_idf_meta_path=args.entity_idf_meta_path,
     )
